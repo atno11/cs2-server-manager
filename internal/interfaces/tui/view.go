@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"charm.land/lipgloss/v2"
 
@@ -34,29 +35,21 @@ func (m Model) render() string {
 	switch m.screen {
 	case screenInformation:
 		content = m.renderInformation()
-
 	case screenConfiguration:
 		content = m.renderConfiguration()
-
 	case screenServers:
 		content = m.renderServers()
-
 	default:
 		content = m.renderHome()
 	}
 
 	header := titleStyle.Render(m.application.Info.Name)
-	version := subtitleStyle.Render(
-		m.application.Info.Version,
-	)
+	version := subtitleStyle.Render(m.application.Info.Version)
 
 	footerText := "↑/↓ Navigate  •  Enter Select  •  Esc Back  •  q Quit"
-
 	if m.screen == screenServers {
 		footerText = "↑/↓ Scroll  •  r Refresh  •  Esc Back  •  q Back"
 	}
-
-	footer := mutedStyle.Render(footerText)
 
 	return strings.Join([]string{
 		"",
@@ -64,7 +57,7 @@ func (m Model) render() string {
 		"",
 		content,
 		"",
-		"  " + footer,
+		"  " + mutedStyle.Render(footerText),
 		"",
 	}, "\n")
 }
@@ -112,16 +105,29 @@ func (m Model) renderInformation() string {
 }
 
 func (m Model) renderConfiguration() string {
-	root := m.application.Config.ServersRoot
+	cfg := m.application.Config
 
+	root := cfg.ServersRoot
 	if root == "" {
 		root = "Not configured"
+	}
+
+	overlayRoot := cfg.OverlayRoot
+	if overlayRoot == "" {
+		overlayRoot = "Not configured"
+	}
+
+	systemdDirs := "Not configured"
+	if len(cfg.SystemdUnitDirectories) > 0 {
+		systemdDirs = strings.Join(cfg.SystemdUnitDirectories, ", ")
 	}
 
 	return strings.Join([]string{
 		"  " + subtitleStyle.Render("Configuration"),
 		"",
-		fmt.Sprintf("  Servers Root: %s", root),
+		"  Servers Root: " + terminalSafe(root),
+		"  Overlay Root: " + terminalSafe(overlayRoot),
+		"  systemd Unit Directories: " + terminalSafe(systemdDirs),
 		"",
 		"  " + mutedStyle.Render(
 			"Configuration is read-only in this version.",
@@ -146,7 +152,7 @@ func (m Model) renderServers() string {
 		return strings.Join(append(
 			lines,
 			"  "+normalStyle.Render("Discovery failed"),
-			"  "+mutedStyle.Render(m.serverError),
+			"  "+mutedStyle.Render(terminalSafe(m.serverError)),
 			"",
 			"  "+mutedStyle.Render("Press r to retry."),
 		), "\n")
@@ -164,25 +170,33 @@ func (m Model) renderServers() string {
 	lines = append(
 		lines,
 		fmt.Sprintf(
-			"  %d instance(s) discovered (filesystem only)",
+			"  %d instance(s) discovered (configuration evidence only)",
 			len(m.servers),
 		),
 		"",
 	)
 
 	visible := len(m.servers)
-
 	if m.height > 0 {
-		visible = max(1, m.height-11)
+		// Reserve space for the focused instance's infrastructure details.
+		visible = max(1, m.height-23)
 	}
 
 	start := min(m.serverOffset, len(m.servers)-1)
 	end := min(start+visible, len(m.servers))
 
-	for _, server := range m.servers[start:end] {
+	for index, server := range m.servers[start:end] {
+		prefix := "    "
+		style := normalStyle
+
+		if index == 0 {
+			prefix = "  ❯ "
+			style = selectedStyle
+		}
+
 		lines = append(
 			lines,
-			"  "+normalStyle.Render(serverLine(server)),
+			prefix+style.Render(serverLine(server)),
 		)
 	}
 
@@ -199,28 +213,157 @@ func (m Model) renderServers() string {
 		)
 	}
 
+	// The first visible instance is the focus of the detail panel.
+	lines = append(lines, "")
+	lines = append(lines, renderInfrastructureDetails(m.servers[start])...)
+
 	return strings.Join(lines, "\n")
 }
 
 func serverLine(server core.DiscoveredServer) string {
 	port := ""
-
 	if server.Port != nil {
 		port = fmt.Sprintf("  port %d", *server.Port)
 	}
 
-	warnings := ""
+	warningCount := len(server.Warnings)
+	infraStatus := ""
 
-	if count := len(server.Warnings); count > 0 {
-		warnings = fmt.Sprintf("  %d warning(s)", count)
+	if infrastructure := server.Infrastructure; infrastructure != nil {
+		warningCount += len(infrastructure.Warnings)
+
+		if infrastructure.OverlayFS != nil {
+			infraStatus += "  OverlayFS: config"
+		}
+		if infrastructure.Systemd != nil {
+			infraStatus += "  systemd: config"
+		}
+	}
+
+	warnings := ""
+	if warningCount > 0 {
+		warnings = fmt.Sprintf("  %d warning(s)", warningCount)
 	}
 
 	return fmt.Sprintf(
-		"%s (%s)  [%s]%s%s",
-		server.Name,
-		server.ID,
+		"%s (%s)  [%s]%s%s%s",
+		terminalSafe(server.Name),
+		terminalSafe(server.ID),
 		server.Status,
 		port,
+		infraStatus,
 		warnings,
 	)
+}
+
+// renderInfrastructureDetails displays configuration evidence only.
+// No runtime state is inferred from any unit or directory.
+func renderInfrastructureDetails(server core.DiscoveredServer) []string {
+	lines := []string{
+		"  " + subtitleStyle.Render(
+			"Infrastructure: "+terminalSafe(server.ID),
+		),
+		"  " + mutedStyle.Render(
+			"Configuration only; mount and service activity not checked.",
+		),
+	}
+
+	infra := server.Infrastructure
+	if infra == nil {
+		return append(
+			lines,
+			"  "+mutedStyle.Render(
+				"No infrastructure metadata available.",
+			),
+		)
+	}
+
+	if overlay := infra.OverlayFS; overlay != nil {
+		lines = append(
+			lines,
+			"  OverlayFS: configuration found",
+			"    Source: "+terminalSafe(overlay.Source),
+			"    Runtime: "+string(overlay.RuntimeState),
+		)
+
+		if len(overlay.LowerDirectories) > 0 {
+			for _, directory := range overlay.LowerDirectories {
+				lines = append(
+					lines,
+					"    Lower: "+terminalSafe(directory),
+				)
+			}
+		}
+		if overlay.UpperDirectory != "" {
+			lines = append(
+				lines,
+				"    Upper: "+terminalSafe(overlay.UpperDirectory),
+			)
+		}
+		if overlay.WorkDirectory != "" {
+			lines = append(
+				lines,
+				"    Work: "+terminalSafe(overlay.WorkDirectory),
+			)
+		}
+		if overlay.MergedDirectory != "" {
+			lines = append(
+				lines,
+				"    Merged: "+terminalSafe(overlay.MergedDirectory),
+			)
+		}
+	} else {
+		lines = append(
+			lines,
+			"  "+mutedStyle.Render("OverlayFS: no metadata available"),
+		)
+	}
+
+	if unit := infra.Systemd; unit != nil {
+		lines = append(
+			lines,
+			"  systemd: mount unit configuration found",
+			"    Unit: "+terminalSafe(unit.UnitName),
+			"    File: "+terminalSafe(unit.UnitFile),
+			"    Where: "+terminalSafe(unit.Where),
+			"    Runtime: "+string(unit.RuntimeState),
+		)
+	} else {
+		lines = append(
+			lines,
+			"  "+mutedStyle.Render("systemd: no metadata available"),
+		)
+	}
+
+	for index, item := range infra.Warnings {
+		if index >= 3 {
+			lines = append(
+				lines,
+				fmt.Sprintf(
+					"  ... %d additional infrastructure warning(s)",
+					len(infra.Warnings)-index,
+				),
+			)
+			break
+		}
+
+		lines = append(
+			lines,
+			"  Warning: "+terminalSafe(item.Code)+
+				" — "+terminalSafe(item.Message),
+		)
+	}
+
+	return lines
+}
+
+// terminalSafe prevents discovered strings from injecting terminal control
+// characters or bidirectional formatting controls into the TUI.
+func terminalSafe(value string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return '�'
+		}
+		return r
+	}, value)
 }

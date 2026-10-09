@@ -1,4 +1,3 @@
-
 # CServer Manager
 
 A modular, cross-platform Counter-Strike 2 dedicated server manager.
@@ -18,8 +17,11 @@ The application provides three interface entry points:
 
 All interfaces share application services and domain models.
 
-The current version supports read-only filesystem discovery
-of existing CS2 server instances.
+The current version supports read-only CS2 server discovery
+and optional OverlayFS and systemd mount-unit configuration
+metadata.
+
+Configuration discovery does not verify runtime activity.
 
 Server lifecycle operations are not implemented yet.
 
@@ -43,7 +45,7 @@ Server lifecycle operations are not implemented yet.
 - `internal/app`: Shared initialization and logging.
 - `internal/core`: Domain models and validation.
 - `internal/service`: Shared application services.
-- `internal/infrastructure`: Filesystem discovery and future adapters.
+- `internal/infrastructure`: Read-only infrastructure adapters.
 - `internal/interfaces/cli`: Command-line interface.
 - `internal/interfaces/http`: HTTP API adapter.
 - `internal/interfaces/tui`: Interactive terminal UI.
@@ -51,8 +53,9 @@ Server lifecycle operations are not implemented yet.
 - `api/openapi.yaml`: HTTP API contract.
 - `docs`: Architecture and development documentation.
 
-See [Architecture](docs/architecture.md) and
-[Server Discovery](docs/server-discovery.md).
+See [Architecture](docs/architecture.md),
+[Server Discovery](docs/server-discovery.md) and
+[Infrastructure Discovery](docs/discovery-infrastructure.md).
 
 ## Requirements
 
@@ -60,8 +63,8 @@ See [Architecture](docs/architecture.md) and
 - Make (optional).
 - A compatible terminal for interactive TUI usage.
 
-Docker and systemd are not required for read-only discovery
-or the automated tests.
+Docker and systemd are not required for the implemented
+read-only discovery or automated tests.
 
 ## Build
 
@@ -117,7 +120,11 @@ CSERVER_ROOT=/path/to/cs2 ./bin/cserver servers list
 
 The discovery command returns a JSON array.
 
-It does not query Docker or modify server configuration.
+Optional infrastructure metadata appears in the
+`infrastructure` field of each applicable server.
+
+The command does not query Docker runtime or modify
+server configuration.
 
 ## Terminal UI
 
@@ -145,6 +152,9 @@ Available screens:
 - Application Information
 - Configuration
 - Servers
+
+The Servers screen displays available configuration
+metadata for the first visible server.
 
 The terminal UI remains read-only.
 
@@ -195,9 +205,16 @@ Configuration is loaded from environment variables.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | CSERVER_ROOT | Empty | CS2 instance root directory |
+| CSERVER_OVERLAY_ROOT | Empty | External OverlayFS storage root |
+| CSERVER_SYSTEMD_UNIT_DIRS | Empty | External systemd unit directories |
 | CSERVER_HTTP_ADDRESS | 127.0.0.1:8080 | HTTP listener |
 | CSERVER_LOG_LEVEL | info | Logging level |
 | CSERVER_LOG_FORMAT | text | Logging output format |
+
+CSERVER_SYSTEMD_UNIT_DIRS accepts an operating-system
+path-list separated sequence of absolute directories.
+
+No infrastructure paths are hardcoded.
 
 Supported logging levels:
 
@@ -214,7 +231,9 @@ Supported logging formats:
 Example:
 
 ```bash
-export CSERVER_ROOT=/path/to/cs2/servers
+export CSERVER_ROOT=/example/servers
+export CSERVER_OVERLAY_ROOT=/example/overlay
+export CSERVER_SYSTEMD_UNIT_DIRS=/example/units
 export CSERVER_HTTP_ADDRESS=127.0.0.1:9090
 export CSERVER_LOG_LEVEL=debug
 export CSERVER_LOG_FORMAT=json
@@ -226,37 +245,41 @@ Configuration values can be inspected with:
 ./bin/cserver config show
 ```
 
-The configuration loader validates absolute paths
-but does not create or modify the configured directory.
+Configuration validation does not create or modify the
+configured directories.
 
-Discovery reports errors for an unconfigured or
-inaccessible root.
+An inaccessible or missing instance root produces an error.
 
-The HTTP listener is restricted to 127.0.0.1
-until authentication and remote-access security
-are implemented.
+Optional infrastructure discovery may report safe warnings
+when configured sources are unavailable.
+
+The HTTP listener is restricted to 127.0.0.1 until
+authentication and remote-access security are implemented.
 
 ## Server Discovery
 
-The filesystem adapter inspects the immediate
+The basic filesystem adapter inspects immediate
 subdirectories of CSERVER_ROOT.
 
 It identifies CS2 candidates using known configuration
-evidence, including per-instance environment settings
-and Compose files.
+evidence, including environment settings and Compose files.
 
 A discovered instance may be complete or incomplete.
 
-This describes filesystem configuration only.
+Optional infrastructure discovery identifies OverlayFS
+directory evidence and systemd overlay mount-unit metadata.
 
-It does not indicate whether the instance is running,
-mounted, healthy, or reachable.
+Infrastructure metadata includes a runtime_state field
+whose value is always not_checked in this release.
 
-Passwords, authentication tokens, and raw environment
-file contents are not included in discovery results.
+No field indicates whether a server is running, mounted,
+healthy or reachable.
 
-See [Server Discovery](docs/server-discovery.md)
-for behavior, security limitations, and testing details.
+Passwords, authentication tokens and raw environment
+or unit contents are not included in discovery results.
+
+See [Server Discovery](docs/server-discovery.md) and
+[Infrastructure Discovery](docs/discovery-infrastructure.md).
 
 ## Logging
 
@@ -278,7 +301,7 @@ CSERVER_LOG_LEVEL=debug ./bin/cserver api serve
 
 CLI command results remain on stdout.
 
-Logging must not expose passwords, tokens, or secrets.
+Logging must not expose passwords, tokens or secrets.
 
 ## Development
 
@@ -332,12 +355,16 @@ make check
 - Read-only filesystem server discovery.
 - Shared discovery service across all interfaces.
 - Incomplete-instance diagnostics.
+- External OverlayFS configuration discovery.
+- Read-only systemd mount-unit configuration discovery.
+- Optional public infrastructure metadata.
+- Explicit separation of configuration and runtime state.
 
 ## Planned Features
 
 - Read-only Docker and Docker Compose runtime inspection.
-- OverlayFS metadata and mount inspection.
-- systemd unit discovery and state inspection.
+- Verification of active OverlayFS mounts.
+- Read-only systemd runtime state inspection.
 - Server lifecycle operations.
 - Server configuration management.
 - CS2 installation and updates.
@@ -348,15 +375,18 @@ make check
 Server discovery does not perform administrative
 operations on existing CS2 servers.
 
-No containers, mounts, or existing server configuration
+No containers, mounts or existing server configuration
 files are modified by the implemented commands.
 
 The HTTP API is restricted to the local loopback address.
 
-The current filesystem adapter is designed for trusted
+Discovery responses can contain local filesystem paths
+and should be treated as sensitive operational metadata.
+
+The filesystem adapters are intended for trusted
 installation directories.
 
-It does not provide complete protection against
+They do not provide complete protection against
 concurrent changes by untrusted local users.
 
 ## License

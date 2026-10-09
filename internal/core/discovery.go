@@ -15,16 +15,17 @@ type DiscoveryWarning struct {
 }
 
 // DiscoveredServer describes a CS2 installation candidate found on disk.
-// It does not report Docker, OverlayFS mount, or systemd runtime state.
+// Infrastructure is optional configuration evidence, not runtime state.
 type DiscoveredServer struct {
-	ID              string             `json:"id"`
-	Name            string             `json:"name"`
-	Directory       string             `json:"directory"`
-	Status          DiscoveryStatus    `json:"status"`
-	ComposeFile     string             `json:"compose_file,omitempty"`
-	EnvFile         string             `json:"env_file,omitempty"`
-	MergedDirectory string             `json:"merged_directory,omitempty"`
-	Port            *int               `json:"port,omitempty"`
-	Evidence        []string           `json:"evidence"`
-	Warnings        []DiscoveryWarning `json:"warnings,omitempty"`
+	ID              string                  `json:"id"`
+	Name            string                  `json:"name"`
+	Directory       string                  `json:"directory"`
+	Status          DiscoveryStatus         `json:"status"`
+	ComposeFile     string                  `json:"compose_file,omitempty"`
+	EnvFile         string                  `json:"env_file,omitempty"`
+	MergedDirectory string                  `json:"merged_directory,omitempty"`
+	Port            *int                    `json:"port,omitempty"`
+	Evidence        []string                `json:"evidence"`
+	Warnings        []DiscoveryWarning      `json:"warnings,omitempty"`
+	Infrastructure  *InfrastructureMetadata `json:"infrastructure,omitempty"`
 }
