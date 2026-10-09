@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+
+	"cserver/internal/core"
 )
 
 var (
@@ -36,6 +38,9 @@ func (m Model) render() string {
 	case screenConfiguration:
 		content = m.renderConfiguration()
 
+	case screenServers:
+		content = m.renderServers()
+
 	default:
 		content = m.renderHome()
 	}
@@ -45,9 +50,13 @@ func (m Model) render() string {
 		m.application.Info.Version,
 	)
 
-	footer := mutedStyle.Render(
-		"↑/↓ Navigate  •  Enter Select  •  Esc Back  •  q Quit",
-	)
+	footerText := "↑/↓ Navigate  •  Enter Select  •  Esc Back  •  q Quit"
+
+	if m.screen == screenServers {
+		footerText = "↑/↓ Scroll  •  r Refresh  •  Esc Back  •  q Back"
+	}
+
+	footer := mutedStyle.Render(footerText)
 
 	return strings.Join([]string{
 		"",
@@ -97,7 +106,7 @@ func (m Model) renderInformation() string {
 		fmt.Sprintf("  Version:  %s", info.Version),
 		"",
 		"  " + mutedStyle.Render(
-			"Server management is not available yet.",
+			"Server lifecycle operations are not available yet.",
 		),
 	}, "\n")
 }
@@ -118,4 +127,100 @@ func (m Model) renderConfiguration() string {
 			"Configuration is read-only in this version.",
 		),
 	}, "\n")
+}
+
+func (m Model) renderServers() string {
+	lines := []string{
+		"  " + subtitleStyle.Render("Discovered Servers"),
+		"",
+	}
+
+	if m.serverLoading {
+		return strings.Join(append(
+			lines,
+			"  "+mutedStyle.Render("Discovering servers..."),
+		), "\n")
+	}
+
+	if m.serverError != "" {
+		return strings.Join(append(
+			lines,
+			"  "+normalStyle.Render("Discovery failed"),
+			"  "+mutedStyle.Render(m.serverError),
+			"",
+			"  "+mutedStyle.Render("Press r to retry."),
+		), "\n")
+	}
+
+	if len(m.servers) == 0 {
+		return strings.Join(append(
+			lines,
+			"  "+mutedStyle.Render("No CS2 instances found."),
+			"",
+			"  "+mutedStyle.Render("Press r to refresh."),
+		), "\n")
+	}
+
+	lines = append(
+		lines,
+		fmt.Sprintf(
+			"  %d instance(s) discovered (filesystem only)",
+			len(m.servers),
+		),
+		"",
+	)
+
+	visible := len(m.servers)
+
+	if m.height > 0 {
+		visible = max(1, m.height-11)
+	}
+
+	start := min(m.serverOffset, len(m.servers)-1)
+	end := min(start+visible, len(m.servers))
+
+	for _, server := range m.servers[start:end] {
+		lines = append(
+			lines,
+			"  "+normalStyle.Render(serverLine(server)),
+		)
+	}
+
+	if end < len(m.servers) {
+		lines = append(
+			lines,
+			"",
+			"  "+mutedStyle.Render(
+				fmt.Sprintf(
+					"%d more instance(s) below",
+					len(m.servers)-end,
+				),
+			),
+		)
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func serverLine(server core.DiscoveredServer) string {
+	port := ""
+
+	if server.Port != nil {
+		port = fmt.Sprintf("  port %d", *server.Port)
+	}
+
+	warnings := ""
+
+	if count := len(server.Warnings); count > 0 {
+		warnings = fmt.Sprintf("  %d warning(s)", count)
+	}
+
+	return fmt.Sprintf(
+		"%s (%s)  [%s]%s%s",
+		server.Name,
+		server.ID,
+		server.Status,
+		port,
+		warnings,
+	)
 }

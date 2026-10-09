@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"cserver/internal/app"
+	"cserver/internal/core"
 	httpapi "cserver/internal/interfaces/http"
 	"cserver/internal/interfaces/tui"
 	"cserver/internal/service"
@@ -54,6 +55,14 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		}
 
 		return showConfig(stdout, stderr)
+
+	case "servers":
+		if len(args) != 2 || args[1] != "list" {
+			fmt.Fprintln(stderr, "Usage: cserver servers list")
+			return 2
+		}
+
+		return listServers(stdout, stderr)
 
 	case "api":
 		if len(args) != 2 || args[1] != "serve" {
@@ -112,6 +121,39 @@ func showConfig(stdout, stderr io.Writer) int {
 	return 0
 }
 
+func listServers(stdout, stderr io.Writer) int {
+	application, ok := initializeApplication(stderr)
+	if !ok {
+		return 1
+	}
+
+	servers, err := application.Discovery.List(
+		context.Background(),
+	)
+	if err != nil {
+		fmt.Fprintln(stderr, "Failed to discover servers:", err)
+		return 1
+	}
+
+	if servers == nil {
+		servers = []core.DiscoveredServer{}
+	}
+
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+
+	if err := encoder.Encode(servers); err != nil {
+		fmt.Fprintln(
+			stderr,
+			"Failed to display servers:",
+			err,
+		)
+		return 1
+	}
+
+	return 0
+}
+
 func runTUI(stdout, stderr io.Writer) int {
 	application, ok := initializeApplication(stderr)
 	if !ok {
@@ -159,7 +201,11 @@ func serveAPI(stderr io.Writer) int {
 		"address", address,
 	)
 
-	if err := httpapi.Serve(ctx, address); err != nil {
+	if err := httpapi.ServeWithDiscovery(
+		ctx,
+		address,
+		application.Discovery,
+	); err != nil {
 		logger.Error(
 			"HTTP API failed",
 			"error", err,
@@ -188,6 +234,7 @@ Commands:
   help           Show this help message
   version        Show application version
   config show    Display the current configuration
+  servers list   Discover existing CS2 servers (read-only)
   api serve      Start the local HTTP API
   tui            Start the interactive terminal interface
 
@@ -201,6 +248,8 @@ HTTP API:
   Default address: 127.0.0.1:8080
   GET /healthz
   GET /api/v1/info
+  GET /api/v1/servers
 
-Server management operations are not yet available.`)
+Server discovery is read-only.
+Server lifecycle operations are not available yet.`)
 }
