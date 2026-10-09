@@ -1,0 +1,99 @@
+openapi: 3.0.3
+
+info:
+  title: CServer Manager API
+  version: 0.1.0-dev
+  description: |
+    HTTP API for CServer Manager.
+
+    This initial version exposes read-only application
+    metadata and health information.
+
+    Server administration endpoints are not available yet.
+
+servers:
+  - url: http://127.0.0.1:8080
+    description: Default local development server
+
+tags:
+  - name: System
+    description: Application health and metadata
+
+paths:
+  /healthz:
+    get:
+      tags:
+        - System
+      summary: Get application health
+      operationId: getHealth
+      description: |
+        Returns the HTTP application's health status.
+        This does not verify Docker or CS2 server health.
+      responses:
+        "200":
+          description: Application is responding
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+  /api/v1/info:
+    get:
+      tags:
+        - System
+      summary: Get application information
+      operationId: getApplicationInfo
+      description: Returns application name and version.
+      responses:
+        "200":
+          description: Application information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationInfo"
+              example:
+                name: CServer Manager
+                version: 0.1.0-dev
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+      additionalProperties: false
+
+    ApplicationInfo:
+      type: object
+      required:
+        - name
+        - version
+      properties:
+        name:
+          type: string
+          example: CServer Manager
+        version:
+          type: string
+          example: 0.1.0-dev
+      additionalProperties: false
+
+  responses:
+    MethodNotAllowed:
+      description: HTTP method is not supported for this resource
+      headers:
+        Allow:
+          description: Allowed HTTP methods
+          schema:
+            type: string
+            example: GET, HEAD
