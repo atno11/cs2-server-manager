@@ -7,13 +7,14 @@ info:
   description: |
     HTTP API for CServer Manager.
 
-    The API exposes application metadata, health information,
-    and read-only filesystem discovery of CS2 server instances.
+    The API provides application information and read-only CS2
+    server discovery, including optional OverlayFS and systemd
+    mount-unit configuration metadata.
 
-    Discovery does not check Docker, OverlayFS mount state,
-    systemd units, or game server runtime health.
+    Configuration evidence does not prove runtime activity.
+    Docker, mount and systemd runtime states are not inspected.
 
-    Server lifecycle operations are not available yet.
+    Server lifecycle operations are not available.
 
 servers:
   - url: http://127.0.0.1:8080
@@ -74,19 +75,26 @@ paths:
       summary: Discover existing CS2 server instances
       operationId: listServers
       description: |
-        Scans the configured CSERVER_ROOT directory and returns
-        filesystem discovery results.
+        Returns CS2 instances found under the configured
+        CSERVER_ROOT directory.
 
-        The response includes valid and incomplete instances.
-        A complete discovery status only indicates the presence
-        of the basic configuration artifacts recognized by the
-        current filesystem adapter.
+        Optional infrastructure configuration can be discovered
+        from external OverlayFS and systemd unit directories.
 
-        This endpoint does not report whether servers are
-        running, stopped, healthy, or mounted.
+        The existing discovery status values describe basic
+        configuration completeness, not runtime health.
 
-        Sensitive environment variables and raw configuration
-        file contents are not included in the response.
+        The optional infrastructure field contains configuration
+        evidence and safe diagnostics only. Its absence does not
+        imply that infrastructure is inactive or unmounted.
+
+        A runtime_state value of not_checked means that no
+        runtime inspection has been performed.
+
+        Sensitive environment variables, arbitrary mount options
+        and raw unit contents are not returned.
+
+        This endpoint does not start, stop or modify servers.
       responses:
         "200":
           description: Discovery completed successfully
@@ -112,6 +120,20 @@ paths:
                     evidence:
                       - env
                       - compose
+                    infrastructure:
+                      overlayfs:
+                        lower_directories:
+                          - /example/servers/base/data
+                        upper_directory: /example/overlay/aim/upper
+                        work_directory: /example/overlay/aim/work
+                        merged_directory: /example/servers/aim/merged
+                        source: filesystem_and_systemd_unit
+                        runtime_state: not_checked
+                      systemd:
+                        unit_name: example-aim.mount
+                        unit_file: /example/units/example-aim.mount
+                        where: /example/servers/aim/merged
+                        runtime_state: not_checked
                 count: 1
         "503":
           description: Discovery is not configured or unavailable
@@ -160,7 +182,7 @@ components:
 
     DiscoveryWarning:
       type: object
-      description: Non-secret discovery diagnostic
+      description: Safe, non-secret discovery diagnostic
       required:
         - code
         - message
@@ -173,11 +195,135 @@ components:
           example: Both .env and a Compose file are required
       additionalProperties: false
 
+    RuntimeInspectionState:
+      type: string
+      description: |
+        Runtime inspection state.
+
+        The only supported value is not_checked because this
+        release does not inspect active mounts, running units,
+        Docker containers or CS2 server health.
+      enum:
+        - not_checked
+
+    OverlayFSMetadata:
+      type: object
+      description: |
+        OverlayFS configuration evidence.
+
+        Paths may originate from existing directories or systemd
+        mount-unit declarations. Their presence in this object
+        does not establish mount activation or runtime validity.
+      required:
+        - source
+        - runtime_state
+      properties:
+        lower_directories:
+          type: array
+          description: Lower-layer directories declared by a mount unit
+          items:
+            type: string
+          example:
+            - /example/servers/base/data
+
+        upper_directory:
+          type: string
+          description: |
+            Detected or declared upper directory path.
+          example: /example/overlay/aim/upper
+
+        work_directory:
+          type: string
+          description: |
+            Detected or declared work directory path.
+          example: /example/overlay/aim/work
+
+        merged_directory:
+          type: string
+          description: |
+            Detected or declared merged mount destination.
+            This does not prove the destination is mounted.
+          example: /example/servers/aim/merged
+
+        source:
+          type: string
+          description: Origin of configuration evidence
+          enum:
+            - filesystem
+            - systemd_unit
+            - filesystem_and_systemd_unit
+
+        runtime_state:
+          $ref: "#/components/schemas/RuntimeInspectionState"
+      additionalProperties: false
+
+    SystemdMountMetadata:
+      type: object
+      description: |
+        Recognized systemd overlay mount-unit configuration.
+
+        No systemd runtime state or enablement information is
+        retrieved. Unit names are retained from discovered files.
+      required:
+        - unit_name
+        - unit_file
+        - where
+        - runtime_state
+      properties:
+        unit_name:
+          type: string
+          description: Mount-unit filename
+          example: example-aim.mount
+
+        unit_file:
+          type: string
+          description: Absolute source unit-file path
+          example: /example/units/example-aim.mount
+
+        where:
+          type: string
+          description: Mount destination declared by the unit
+          example: /example/servers/aim/merged
+
+        runtime_state:
+          $ref: "#/components/schemas/RuntimeInspectionState"
+      additionalProperties: false
+
+    InfrastructureMetadata:
+      type: object
+      description: |
+        Optional infrastructure configuration metadata.
+
+        This object may include OverlayFS information, systemd
+        mount-unit information, warnings, or a combination.
+
+        A warnings-only object is valid when configured
+        infrastructure sources cannot be inspected.
+
+        Missing metadata must never be interpreted as stopped,
+        inactive or unmounted infrastructure.
+      minProperties: 1
+      properties:
+        overlayfs:
+          $ref: "#/components/schemas/OverlayFSMetadata"
+
+        systemd:
+          $ref: "#/components/schemas/SystemdMountMetadata"
+
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiscoveryWarning"
+      additionalProperties: false
+
     DiscoveredServer:
       type: object
       description: |
         Filesystem inventory record.
-        Status does not represent runtime health.
+
+        Status describes basic configuration completeness.
+        Infrastructure metadata is optional and reports only
+        evidence from configured read-only sources.
       required:
         - id
         - name
@@ -188,31 +334,41 @@ components:
         id:
           type: string
           example: aim
+
         name:
           type: string
           example: AIM Server
+
         directory:
           type: string
           description: Absolute instance directory
+
         status:
           type: string
           enum:
             - complete
             - incomplete
+
         compose_file:
           type: string
           description: Detected Compose file path
+
         env_file:
           type: string
           description: Detected environment file path
+
         merged_directory:
           type: string
-          description: Detected OverlayFS merged directory path
+          description: |
+            Merged directory detected by the basic filesystem
+            scanner. This does not prove an active mount.
+
         port:
           type: integer
           minimum: 1
           maximum: 65535
           example: 27018
+
         evidence:
           type: array
           items:
@@ -220,10 +376,14 @@ components:
           example:
             - env
             - compose
+
         warnings:
           type: array
           items:
             $ref: "#/components/schemas/DiscoveryWarning"
+
+        infrastructure:
+          $ref: "#/components/schemas/InfrastructureMetadata"
       additionalProperties: false
 
     ServersResponse:
@@ -236,6 +396,7 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/DiscoveredServer"
+
         count:
           type: integer
           minimum: 0

@@ -5,10 +5,15 @@
 CServer Manager is a modular Go application designed
 to manage Counter-Strike 2 dedicated server instances.
 
-The application follows a modular monolith architecture.
+The project follows a modular monolith architecture.
 
-CLI, TUI, and HTTP share application services
-and domain models.
+CLI, TUI and HTTP share application services and domain models.
+
+The current implementation provides read-only server discovery
+and optional OverlayFS and systemd mount-unit configuration
+metadata.
+
+No server lifecycle operations are implemented.
 
 ## 2. Architecture Layers
 
@@ -22,9 +27,18 @@ Responsibilities:
 - Business invariants.
 - Domain validation.
 - Domain-specific errors.
+- Discovery and infrastructure metadata.
 
-The domain must remain independent of external
-technologies such as Docker, HTTP, and systemd.
+The domain remains independent of Docker, HTTP, systemd
+and presentation libraries.
+
+DiscoveredServer represents a filesystem-discovered instance.
+
+InfrastructureMetadata contains optional OverlayFS,
+systemd mount-unit and discovery warning information.
+
+Infrastructure configuration evidence must not be treated
+as runtime health or activity.
 
 ### Services / Application
 
@@ -38,11 +52,25 @@ Responsibilities:
 - Error propagation.
 - Rollback coordination when applicable.
 
-The initial shared service provides application metadata.
+Implemented services include application information
+and read-only server discovery.
 
-Future use cases include:
+ServerDiscoveryService exposes the List operation to
+all presentation interfaces.
 
-- Discover servers.
+ServerReader abstracts basic instance discovery.
+
+InfrastructureBatchReader abstracts optional,
+read-only infrastructure enrichment.
+
+The original ServerDiscoveryService constructor remains
+available for clients without infrastructure enrichment.
+
+The service does not parse configuration files or
+query infrastructure runtime state directly.
+
+Future use cases may include:
+
 - Create server instances.
 - Start and stop servers.
 - Restart servers.
@@ -55,29 +83,53 @@ Location: `internal/app`
 
 Responsibilities:
 
-- Initialize shared application configuration.
-- Provide application metadata to interfaces.
-- Construct structured application loggers.
+- Load and validate shared configuration.
+- Provide application metadata.
+- Construct application services.
+- Configure structured logging.
+- Wire replaceable infrastructure adapters.
 
-Application initialization must not modify
-existing CS2 infrastructure.
+Initialization must not scan or modify existing
+CS2 server installations.
+
+Discovery is performed only when requested.
 
 ### Infrastructure
 
 Location: `internal/infrastructure`
 
-Future infrastructure adapters will integrate with:
+Implemented adapters include read-only filesystem
+discovery of server instances and optional infrastructure
+metadata from explicitly configured paths.
 
-- Docker Engine.
-- Docker Compose.
-- OverlayFS.
-- systemd.
-- Local filesystems.
+The infrastructure reader can inspect:
 
-Adapters must not contain domain-specific business rules.
+- CS2 instance configuration evidence.
+- Per-instance OverlayFS directory metadata.
+- Recognized systemd overlay mount-unit files.
 
-External dependencies should be introduced only when
-a concrete application use case requires them.
+Systemd unit directories are scanned once per
+inventory refresh.
+
+Parsed units are associated with already-discovered
+server instances using indexed path evidence.
+
+Units matching multiple instances are not assigned
+automatically.
+
+Conflicting filesystem and declared OverlayFS paths
+produce safe warnings.
+
+Infrastructure readers do not execute mount, umount,
+systemctl or Docker lifecycle operations.
+
+Runtime inspection is not implemented.
+
+Future infrastructure integrations may include
+read-only Docker and Docker Compose state inspection.
+
+External dependencies are introduced only when a
+concrete application use case requires them.
 
 ### Interfaces
 
@@ -89,10 +141,16 @@ Supported interfaces:
 - TUI: Interactive terminal navigation.
 - HTTP: REST API for external clients.
 
-Interfaces handle user input, invoke application
-services, and present results.
+Interfaces invoke shared application services
+instead of independently scanning infrastructure.
 
-Business operations must not be duplicated.
+The CLI exposes server inventory as a JSON array.
+
+The HTTP API exposes the inventory inside a response
+containing servers and count.
+
+The TUI displays discovered instances and available
+configuration metadata.
 
 ### Configuration
 
@@ -102,64 +160,82 @@ Responsibilities:
 
 - Load application configuration.
 - Validate configuration values.
-- Provide normalized settings.
+- Normalize installation-specific paths.
+- Provide settings to application initialization.
 
-Installation-specific paths must remain configurable.
+All infrastructure roots are configurable.
+
+No server, OverlayFS or systemd installation path
+is assumed automatically.
 
 ## 3. Dependency Direction
 
-Interfaces depend on application services
-and shared application initialization.
+Interfaces depend on shared application services
+and application initialization.
 
-Application services depend on domain models and
-minimal integration contracts.
+Application services depend on domain models
+and small integration interfaces.
 
-Infrastructure adapters implement these contracts.
+Infrastructure adapters implement those interfaces.
 
-The domain layer must not depend on interfaces,
-application services, or infrastructure.
+The domain must not depend on interfaces,
+application services or infrastructure implementations.
+
+No interface duplicates the filesystem discovery logic.
 
 ## 4. Current Interface Architecture
 
 ### CLI
 
-The CLI is the executable's initial command dispatcher.
-
-Current commands:
+Implemented commands include:
 
 - help
 - version
 - config show
+- servers list
 - api serve
 - tui
+
+The servers list command returns a JSON array with
+optional infrastructure configuration metadata.
 
 ### TUI
 
 The TUI uses Bubble Tea v2 and Lip Gloss v2.
 
-The initial implementation provides:
+Implemented screens include:
 
-- Keyboard navigation.
+- Main menu.
 - Application information.
 - Configuration information.
-- Safe application exit.
+- Discovered servers and infrastructure metadata.
+
+Discovery is requested asynchronously.
+
+Results from outdated discovery requests are ignored.
+
+The first visible server is the focus of the
+infrastructure metadata panel.
 
 The TUI does not perform server administration.
 
 ### HTTP API
 
-The HTTP adapter uses the Go net/http package.
+The HTTP adapter uses Go net/http.
 
 Implemented endpoints:
 
 - GET /healthz
 - GET /api/v1/info
+- GET /api/v1/servers
 
-Application metadata is provided by
-the shared service package.
+The server inventory includes optional infrastructure
+configuration metadata using the shared domain models.
 
-The listener uses a configurable local-only
-address, defaulting to 127.0.0.1:8080.
+The listener is restricted to a configurable
+127.0.0.1 address.
+
+The servers endpoint sets Cache-Control: no-store.
 
 The HTTP server supports graceful shutdown
 through context.Context.
@@ -173,18 +249,48 @@ Configuration is loaded from environment variables.
 Current variables:
 
 - CSERVER_ROOT
+- CSERVER_OVERLAY_ROOT
+- CSERVER_SYSTEMD_UNIT_DIRS
 - CSERVER_HTTP_ADDRESS
 - CSERVER_LOG_LEVEL
 - CSERVER_LOG_FORMAT
 
-The loader validates configuration before
-initializing interfaces that require it.
+The loader validates configuration before interfaces
+and services are initialized.
 
-No server directories are created during loading.
+CSERVER_SYSTEMD_UNIT_DIRS supports multiple absolute
+paths separated by the operating system's path-list
+separator.
+
+No infrastructure directories are created during
+configuration loading.
 
 The HTTP listener must use 127.0.0.1.
 
-## 6. Design Principles
+## 6. Discovery Semantics
+
+Basic discovery statuses are:
+
+- complete
+- incomplete
+
+They indicate basic filesystem configuration
+completeness, not runtime status.
+
+Infrastructure metadata may report recognized
+OverlayFS directories and systemd mount-unit declarations.
+
+The infrastructure runtime_state is always:
+
+    not_checked
+
+No runtime health or mount activation is inferred
+from the presence or absence of configuration files.
+
+Missing infrastructure metadata does not prove
+that a server is stopped or unmounted.
+
+## 7. Design Principles
 
 1. Prefer the Go standard library.
 2. Avoid unnecessary abstractions.
@@ -196,8 +302,10 @@ The HTTP listener must use 127.0.0.1.
 8. Never assume fixed server installation paths.
 9. Validate administrative inputs before execution.
 10. Keep startup free of infrastructure side effects.
+11. Distinguish configuration evidence from runtime status.
+12. Keep discovery read-only and secrets out of results.
 
-## 7. Error Handling
+## 8. Error Handling
 
 Errors must be returned explicitly.
 
@@ -209,13 +317,17 @@ and errors.Is.
 
 Do not use panic for normal operational failures.
 
+Safe discovery warnings describe incomplete or ambiguous
+infrastructure configuration without exposing raw
+configuration values.
+
 CLI exit codes:
 
 - 0: Success.
 - 1: Execution or configuration error.
 - 2: Invalid command usage.
 
-## 8. Structured Logging
+## 9. Structured Logging
 
 Logging uses the Go log/slog package.
 
@@ -233,9 +345,9 @@ Operational logs are written to stderr.
 User-facing command results remain on stdout.
 
 Logs must not expose secrets, passwords,
-authentication tokens, or credentials.
+authentication tokens or credentials.
 
-## 9. Testing
+## 10. Testing
 
 Use the standard Go testing package.
 
@@ -247,29 +359,54 @@ TUI navigation is tested through Bubble Tea messages.
 
 Configuration and logging are tested independently.
 
-Integration tests may be placed under tests/
-when external integrations are introduced.
+Discovery tests use temporary filesystem fixtures.
 
-Unit tests must not require real CS2 servers,
-Docker containers, or systemd services.
+Infrastructure tests cover:
 
-## 10. Operational Safety
+- External configuration roots.
+- Valid and invalid unit files.
+- Missing and unrelated units.
+- Symbolic links.
+- Duplicate unit directories.
+- Conflicting configuration paths.
+- Cross-instance association ambiguity.
+- Public JSON compatibility.
+- Secret filtering.
+- Cancellation and concurrency safety.
 
-Administrative operations must validate inputs
-before modifying infrastructure.
+A benchmark measures read-only infrastructure
+discovery using multiple fixture instances and units.
 
-Operations should support cancellation and timeouts.
+Tests do not require live CS2 servers, Docker
+containers, active OverlayFS mounts or systemd services.
 
-Rollback should be implemented where applicable.
+## 11. Operational Safety
+
+Discovery must remain read-only.
 
 Application startup must not implicitly modify
-existing CS2 servers.
+existing CS2 installations.
 
-Paths must be validated before filesystem operations.
+Paths must be validated before filesystem access.
 
-The current HTTP API is restricted to loopback.
+Only explicitly configured infrastructure sources
+are scanned.
 
-## 11. Platform Compatibility
+The parser retains recognized metadata instead
+of returning raw configuration contents.
+
+Warnings must not disclose secrets.
+
+Filesystem symlink checks do not provide complete
+protection against concurrent adversarial changes.
+
+Use trusted directories and minimal privileges.
+
+The HTTP API remains restricted to loopback.
+
+Server lifecycle operations are outside the current scope.
+
+## 12. Platform Compatibility
 
 Target platforms:
 
@@ -277,26 +414,30 @@ Target platforms:
 - Windows.
 - macOS.
 
-Platform-specific infrastructure features must be
-isolated behind appropriate adapters.
+Platform-specific infrastructure features must remain
+isolated behind adapters.
 
-Linux-only features such as OverlayFS and systemd
-must not prevent the application core and interfaces
-from compiling on other platforms.
+The core and presentation interfaces must not require
+a running Linux systemd manager or OverlayFS mount.
 
-## 12. Future Evolution
+Path behavior and available infrastructure metadata
+may vary across platforms.
 
-Additional components will be introduced as concrete
-use cases are implemented and tested.
+## 13. Future Evolution
 
 Future work may include:
 
-- Docker and Docker Compose adapters.
-- Instance discovery.
-- Platform-specific lifecycle operations.
+- Read-only Docker and Docker Compose inspection.
+- Verified mount and systemd runtime status.
+- Server lifecycle operations.
+- Configuration editing.
+- Installation and update workflows.
 - Expanded TUI navigation.
 - Authenticated administrative HTTP endpoints.
 - Persistent configuration when required.
+
+Runtime inspection must remain separate from
+configuration discovery.
 
 The architecture should remain simple and avoid
 premature generalization.

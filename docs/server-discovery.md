@@ -1,29 +1,42 @@
-
 # Server Discovery
 
 ## Overview
 
-CServer Manager supports read-only discovery of existing
+CServer Manager provides read-only discovery of existing
 Counter-Strike 2 dedicated server instances.
 
-Discovery is shared across the CLI, TUI, and HTTP API.
+Discovery is shared across CLI, TUI and HTTP through
+ServerDiscoveryService.
 
-The application does not create, delete, start, stop,
-restart, or modify existing servers during discovery.
+Optional infrastructure discovery identifies OverlayFS
+directory metadata and systemd overlay mount-unit configuration.
+
+Configuration evidence does not establish runtime activity.
+
+Discovery never creates, deletes, starts, stops, restarts
+or modifies CS2 servers.
 
 ## Configuration
 
-Set CSERVER_ROOT to an absolute path containing instance
-directories.
+Set an absolute root containing the instance directories:
 
-Example:
+    export CSERVER_ROOT=/example/servers
 
-    export CSERVER_ROOT=/path/to/cs2
+Optional infrastructure locations:
 
-The root is not created automatically.
+    export CSERVER_OVERLAY_ROOT=/example/overlay
+    export CSERVER_SYSTEMD_UNIT_DIRS=/example/units
 
-An unconfigured or inaccessible root is reported as an
-error rather than an empty server inventory.
+CSERVER_SYSTEMD_UNIT_DIRS supports multiple directories
+separated by the operating system's path-list separator.
+
+No default infrastructure location is assumed.
+
+An unconfigured or inaccessible CSERVER_ROOT is reported
+as an error instead of an empty inventory.
+
+Infrastructure paths are optional. Missing or unreadable
+infrastructure locations produce safe discovery warnings.
 
 ## CLI
 
@@ -33,7 +46,13 @@ Discover servers:
 
 The command returns a JSON array.
 
-An empty root with no discoverable instances returns [].
+When infrastructure evidence is available, each server may
+contain an optional `infrastructure` object.
+
+When no infrastructure metadata is available, that object
+is omitted.
+
+An empty root returns [].
 
 Exit codes:
 
@@ -47,20 +66,26 @@ Start the TUI:
 
     cserver tui
 
-Select "Servers" in the main menu.
+Select "Servers" from the main menu.
 
 Controls:
 
-- Up/Down or j/k: Navigate the displayed list.
-- r: Refresh the server inventory.
+- Up/Down or j/k: Scroll through discovered instances.
+- r: Refresh discovery.
 - Esc or Backspace: Return to the main menu.
 - q: Return to the main menu.
 - Ctrl+C: Exit the application.
 
-Discovery runs as a Bubble Tea command instead of
-blocking the event handler.
+The first visible server is the focus of the infrastructure
+details panel.
 
-Results from superseded requests are ignored.
+The panel displays recognized configuration paths, sources,
+unit metadata, runtime inspection status and safe warnings.
+
+A visible systemd mount unit does not mean that it is active.
+
+Discovery runs asynchronously as a Bubble Tea command.
+Results from superseded discovery requests are ignored.
 
 ## HTTP API
 
@@ -68,83 +93,104 @@ Start the local API:
 
     cserver api serve
 
-Query the inventory:
+Retrieve the inventory:
 
     curl http://127.0.0.1:8080/api/v1/servers
 
-Successful response:
+The response envelope remains:
 
     {
       "servers": [],
       "count": 0
     }
 
-The HTTP API uses these status codes:
+The optional `infrastructure` property is available inside
+individual server objects when metadata has been discovered.
+
+HTTP status codes remain:
 
 - 200: Discovery succeeded.
 - 503: Discovery unavailable or not configured.
 - 405: Unsupported HTTP method.
 
-The endpoint is read-only and does not expose raw
-environment file contents.
+Successful responses include Cache-Control: no-store.
 
-The HTTP listener remains restricted to 127.0.0.1.
+The HTTP listener is restricted to 127.0.0.1.
 
-The response includes local filesystem paths and should
-not be exposed publicly without appropriate security.
+The response can contain local filesystem paths. Do not
+expose the endpoint publicly without suitable security.
 
 ## Shared Architecture
 
-Application initialization creates one
-ServerDiscoveryService instance.
+Application initialization creates one ServerDiscoveryService.
 
-The service delegates reads to the filesystem Discoverer.
+The service delegates basic discovery to the filesystem
+Discoverer and optional infrastructure enrichment to the
+InfrastructureBatchReader.
 
-The CLI, TUI, and HTTP interfaces call the same service.
+Each configured systemd unit directory is scanned once
+per inventory refresh rather than once per server.
 
-No interface implements its own filesystem scan.
+CLI, TUI and HTTP call the same discovery service.
+
+No interface independently scans infrastructure paths.
 
 ## Discovery Status
 
-The initial filesystem adapter reports:
+Basic discovery status:
 
-- complete: Basic .env and Compose files are found.
-- incomplete: A candidate is identified but is missing
-  one or more basic configuration artifacts.
+- complete: Basic .env and Compose artifacts were found.
+- incomplete: A candidate is missing one or more artifacts.
 
-These statuses do not report:
+Neither status indicates runtime health.
 
-- Docker container state.
-- Docker Compose validity.
-- Active OverlayFS mount state.
-- systemd unit state.
-- Game server health.
-- Network availability.
+OverlayFS metadata may describe:
+
+- Lower directories declared by a mount unit.
+- Upper directory.
+- Work directory.
+- Merged directory.
+- Configuration evidence source.
+
+systemd metadata may describe:
+
+- Mount-unit filename.
+- Source unit-file path.
+- Configured mount destination.
+
+Infrastructure runtime_state is always `not_checked`
+in this release.
+
+It does not mean active, inactive, mounted, unmounted,
+running or stopped.
+
+A missing infrastructure object does not mean that
+infrastructure is absent or inactive.
 
 ## Security and Limitations
 
-Discovery only reads configuration and directory metadata.
+Discovery reads only configured filesystem locations.
 
-Known non-secret CS2 environment fields may be inspected
-to identify candidates.
+Sensitive CS2 environment variables and arbitrary systemd
+unit options are not returned.
 
-Passwords, tokens, and raw environment contents are not
-returned through the interfaces.
+Read-only infrastructure metadata may expose local
+filesystem paths, including installation layout details.
 
-The initial filesystem adapter does not fully parse
-Docker Compose YAML or resolve every referenced env_file.
+The initial infrastructure scanner does not implement complete
+systemd semantics, drop-in parsing, specifier expansion,
+advanced mount-option escaping or active mount inspection.
 
-Symlink checks are preliminary and do not provide
-complete protection against concurrent filesystem changes
-by an untrusted local user.
+Filesystem symlink protections do not defend against every
+concurrent change by an untrusted local user.
 
-Do not run the discovery process with elevated privileges
-against attacker-controlled directories.
+Do not scan attacker-controlled directories with unnecessary
+privileges.
 
 ## Testing
 
 Unit and integration tests use temporary directories and
-in-memory service readers.
+fixture configuration files.
 
 Run:
 
@@ -153,13 +199,21 @@ Run:
     go test -race ./...
     go build -o .tmp/cserver ./cmd/cserver
 
-No real CS2 installation, Docker daemon, OverlayFS mount,
-or systemd service is required.
+No active OverlayFS mount, systemd manager, running Docker
+daemon or game server is required.
+
+## Related Documentation
+
+See discovery-infrastructure.md for infrastructure-specific
+configuration and behavior.
+
+See ../api/openapi.yaml for the HTTP response contract.
 
 ## Future Work
 
-A later stage may enrich discovery with read-only Docker,
-OverlayFS, and systemd metadata.
+Future stages may add verified runtime inspection through
+read-only system facilities and Docker integrations.
 
-Server lifecycle operations are intentionally excluded
-from this stage.
+Runtime checks must remain separate from configuration evidence.
+
+Server lifecycle operations are outside this stage.

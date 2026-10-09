@@ -13,22 +13,28 @@ type App struct {
 	Discovery *service.ServerDiscoveryService
 }
 
-// New initializes the application without modifying
-// external infrastructure or scanning server directories.
+// New sets up readers lazily without scanning or changing external state.
 func New() (App, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return App{}, err
 	}
 
-	discovery, err := service.NewServerDiscoveryService(
+	var infrastructure service.InfrastructureBatchReader
+	if cfg.OverlayRoot != "" || len(cfg.SystemdUnitDirectories) != 0 {
+		infrastructure = filesystem.InfrastructureReader{Paths: filesystem.InfrastructurePaths{
+			OverlayRoot:            cfg.OverlayRoot,
+			SystemdUnitDirectories: cfg.SystemdUnitDirectories,
+		}}
+	}
+	discovery, err := service.NewServerDiscoveryServiceWithInfrastructure(
 		cfg.ServersRoot,
 		filesystem.Discoverer{},
+		infrastructure,
 	)
 	if err != nil {
 		return App{}, err
 	}
-
 	return App{
 		Config:    cfg,
 		Info:      service.GetApplicationInfo(),
