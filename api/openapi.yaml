@@ -1,3 +1,4 @@
+
 openapi: 3.0.3
 
 info:
@@ -6,10 +7,13 @@ info:
   description: |
     HTTP API for CServer Manager.
 
-    This initial version exposes read-only application
-    metadata and health information.
+    The API exposes application metadata, health information,
+    and read-only filesystem discovery of CS2 server instances.
 
-    Server administration endpoints are not available yet.
+    Discovery does not check Docker, OverlayFS mount state,
+    systemd units, or game server runtime health.
+
+    Server lifecycle operations are not available yet.
 
 servers:
   - url: http://127.0.0.1:8080
@@ -18,6 +22,8 @@ servers:
 tags:
   - name: System
     description: Application health and metadata
+  - name: Servers
+    description: Read-only CS2 server discovery
 
 paths:
   /healthz:
@@ -61,6 +67,70 @@ paths:
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
 
+  /api/v1/servers:
+    get:
+      tags:
+        - Servers
+      summary: Discover existing CS2 server instances
+      operationId: listServers
+      description: |
+        Scans the configured CSERVER_ROOT directory and returns
+        filesystem discovery results.
+
+        The response includes valid and incomplete instances.
+        A complete discovery status only indicates the presence
+        of the basic configuration artifacts recognized by the
+        current filesystem adapter.
+
+        This endpoint does not report whether servers are
+        running, stopped, healthy, or mounted.
+
+        Sensitive environment variables and raw configuration
+        file contents are not included in the response.
+      responses:
+        "200":
+          description: Discovery completed successfully
+          headers:
+            Cache-Control:
+              description: Prevent caching local inventory data
+              schema:
+                type: string
+                example: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServersResponse"
+              example:
+                servers:
+                  - id: aim
+                    name: AIM Server
+                    directory: /example/servers/aim
+                    status: complete
+                    compose_file: /example/servers/aim/compose.yaml
+                    env_file: /example/servers/aim/.env
+                    port: 27018
+                    evidence:
+                      - env
+                      - compose
+                count: 1
+        "503":
+          description: Discovery is not configured or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                notConfigured:
+                  summary: Discovery root is not configured
+                  value:
+                    error: discovery_not_configured
+                unavailable:
+                  summary: Discovery service is unavailable
+                  value:
+                    error: discovery_unavailable
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
 components:
   schemas:
     HealthResponse:
@@ -86,6 +156,102 @@ components:
         version:
           type: string
           example: 0.1.0-dev
+      additionalProperties: false
+
+    DiscoveryWarning:
+      type: object
+      description: Non-secret discovery diagnostic
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          example: incomplete_configuration
+        message:
+          type: string
+          example: Both .env and a Compose file are required
+      additionalProperties: false
+
+    DiscoveredServer:
+      type: object
+      description: |
+        Filesystem inventory record.
+        Status does not represent runtime health.
+      required:
+        - id
+        - name
+        - directory
+        - status
+        - evidence
+      properties:
+        id:
+          type: string
+          example: aim
+        name:
+          type: string
+          example: AIM Server
+        directory:
+          type: string
+          description: Absolute instance directory
+        status:
+          type: string
+          enum:
+            - complete
+            - incomplete
+        compose_file:
+          type: string
+          description: Detected Compose file path
+        env_file:
+          type: string
+          description: Detected environment file path
+        merged_directory:
+          type: string
+          description: Detected OverlayFS merged directory path
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          example: 27018
+        evidence:
+          type: array
+          items:
+            type: string
+          example:
+            - env
+            - compose
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiscoveryWarning"
+      additionalProperties: false
+
+    ServersResponse:
+      type: object
+      required:
+        - servers
+        - count
+      properties:
+        servers:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiscoveredServer"
+        count:
+          type: integer
+          minimum: 0
+          example: 1
+      additionalProperties: false
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          enum:
+            - discovery_not_configured
+            - discovery_unavailable
       additionalProperties: false
 
   responses:

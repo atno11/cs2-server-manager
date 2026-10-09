@@ -1,3 +1,4 @@
+
 # CServer Manager
 
 A modular, cross-platform Counter-Strike 2 dedicated server manager.
@@ -17,7 +18,10 @@ The application provides three interface entry points:
 
 All interfaces share application services and domain models.
 
-Server administration features are not implemented yet.
+The current version supports read-only filesystem discovery
+of existing CS2 server instances.
+
+Server lifecycle operations are not implemented yet.
 
 ## Technology Stack
 
@@ -36,10 +40,10 @@ Server administration features are not implemented yet.
 ## Project Structure
 
 - `cmd/cserver`: Application entry point.
-- `internal/app`: Shared application initialization and logging.
+- `internal/app`: Shared initialization and logging.
 - `internal/core`: Domain models and validation.
 - `internal/service`: Shared application services.
-- `internal/infrastructure`: Future external adapters.
+- `internal/infrastructure`: Filesystem discovery and future adapters.
 - `internal/interfaces/cli`: Command-line interface.
 - `internal/interfaces/http`: HTTP API adapter.
 - `internal/interfaces/tui`: Interactive terminal UI.
@@ -47,7 +51,8 @@ Server administration features are not implemented yet.
 - `api/openapi.yaml`: HTTP API contract.
 - `docs`: Architecture and development documentation.
 
-See [Architecture](docs/architecture.md) for more details.
+See [Architecture](docs/architecture.md) and
+[Server Discovery](docs/server-discovery.md).
 
 ## Requirements
 
@@ -55,7 +60,8 @@ See [Architecture](docs/architecture.md) for more details.
 - Make (optional).
 - A compatible terminal for interactive TUI usage.
 
-Docker and systemd are not required for this version.
+Docker and systemd are not required for read-only discovery
+or the automated tests.
 
 ## Build
 
@@ -103,6 +109,16 @@ Display configuration:
 ./bin/cserver config show
 ```
 
+Discover existing CS2 server instances:
+
+```bash
+CSERVER_ROOT=/path/to/cs2 ./bin/cserver servers list
+```
+
+The discovery command returns a JSON array.
+
+It does not query Docker or modify server configuration.
+
 ## Terminal UI
 
 Start the interactive terminal interface:
@@ -115,11 +131,12 @@ Keyboard shortcuts:
 
 | Key | Action |
 |-----|--------|
-| Up / k | Previous menu item |
-| Down / j | Next menu item |
+| Up / k | Previous item or scroll |
+| Down / j | Next item or scroll |
 | Enter | Open selected screen |
+| r | Refresh discovery on the Servers screen |
 | Esc / Backspace | Return to main menu |
-| q | Quit from main menu |
+| q | Quit or return to main menu |
 | Ctrl+C | Quit immediately |
 
 Available screens:
@@ -127,8 +144,9 @@ Available screens:
 - Main Menu
 - Application Information
 - Configuration
+- Servers
 
-The terminal UI is read-only in this version.
+The terminal UI remains read-only.
 
 ## HTTP API
 
@@ -148,17 +166,19 @@ Available endpoints:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | /healthz | HTTP application health |
+| GET | /healthz | Application health |
 | GET | /api/v1/info | Application metadata |
+| GET | /api/v1/servers | Read-only server discovery |
 
 Example requests:
 
 ```bash
 curl http://127.0.0.1:8080/healthz
 curl http://127.0.0.1:8080/api/v1/info
+curl http://127.0.0.1:8080/api/v1/servers
 ```
 
-The HTTP API does not expose server administration operations.
+The API does not expose lifecycle operations.
 
 The OpenAPI contract is available at:
 
@@ -209,9 +229,34 @@ Configuration values can be inspected with:
 The configuration loader validates absolute paths
 but does not create or modify the configured directory.
 
+Discovery reports errors for an unconfigured or
+inaccessible root.
+
 The HTTP listener is restricted to 127.0.0.1
 until authentication and remote-access security
 are implemented.
+
+## Server Discovery
+
+The filesystem adapter inspects the immediate
+subdirectories of CSERVER_ROOT.
+
+It identifies CS2 candidates using known configuration
+evidence, including per-instance environment settings
+and Compose files.
+
+A discovered instance may be complete or incomplete.
+
+This describes filesystem configuration only.
+
+It does not indicate whether the instance is running,
+mounted, healthy, or reachable.
+
+Passwords, authentication tokens, and raw environment
+file contents are not included in discovery results.
+
+See [Server Discovery](docs/server-discovery.md)
+for behavior, security limitations, and testing details.
 
 ## Logging
 
@@ -264,7 +309,7 @@ go test -race ./...
 Build:
 
 ```bash
-go build ./cmd/cserver
+go build -o .tmp/cserver ./cmd/cserver
 ```
 
 Run standard checks:
@@ -284,13 +329,15 @@ make check
 - Structured application logging.
 - OpenAPI contract.
 - Automated unit tests.
+- Read-only filesystem server discovery.
+- Shared discovery service across all interfaces.
+- Incomplete-instance diagnostics.
 
 ## Planned Features
 
-- CS2 instance discovery.
-- Docker and Docker Compose integration.
-- OverlayFS management.
-- systemd integration.
+- Read-only Docker and Docker Compose runtime inspection.
+- OverlayFS metadata and mount inspection.
+- systemd unit discovery and state inspection.
 - Server lifecycle operations.
 - Server configuration management.
 - CS2 installation and updates.
@@ -298,13 +345,19 @@ make check
 
 ## Operational Safety
 
-The application does not perform administrative
-operations on existing CS2 servers in this version.
+Server discovery does not perform administrative
+operations on existing CS2 servers.
 
-No containers, mounts, or server configuration files
-are modified by the implemented commands.
+No containers, mounts, or existing server configuration
+files are modified by the implemented commands.
 
 The HTTP API is restricted to the local loopback address.
+
+The current filesystem adapter is designed for trusted
+installation directories.
+
+It does not provide complete protection against
+concurrent changes by untrusted local users.
 
 ## License
 

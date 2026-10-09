@@ -7,12 +7,24 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"cserver/internal/service"
 )
 
 const DefaultAddress = "127.0.0.1:8080"
 
-// Serve starts the HTTP API and supports graceful shutdown.
+// Serve preserves the original Stage 1 entry point.
 func Serve(ctx context.Context, address string) error {
+	return ServeWithDiscovery(ctx, address, nil)
+}
+
+// ServeWithDiscovery starts the local API with a shared
+// read-only discovery service and graceful shutdown.
+func ServeWithDiscovery(
+	ctx context.Context,
+	address string,
+	discovery *service.ServerDiscoveryService,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -24,7 +36,7 @@ func Serve(ctx context.Context, address string) error {
 	defer listener.Close()
 
 	server := &http.Server{
-		Handler:           NewHandler(),
+		Handler:           NewHandlerWithDiscovery(discovery),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
