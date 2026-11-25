@@ -23,3 +23,7 @@ Independent lifecycle review fixes are implemented and simulated checks pass. Se
 ## Phase 1.1.2
 
 FLAKY-001 was reproduced, fixed narrowly and validated with 100 normal and 50 race-detector repetitions of the affected test. See `phases/phase-01-1-2.md`. The next action is host-side commit and review of the stability fix before any merge decision; Phase 1.2 remains deferred.
+
+## Phase 1.2
+
+Security hardening is implemented for a single local administrator: bearer authentication, origin/authority checks, strict HTTP input, trusted execution policy, private persistence and known-secret log redaction. See `phases/phase-01-2.md`. Next, review and commit this phase on the host, then plan a separately scoped increment. SQLite, SSE and native CS2 validation remain pending; no remote-host feature is included.

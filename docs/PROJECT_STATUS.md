@@ -25,3 +25,7 @@ The independent lifecycle review is resolved in code and simulated validation. S
 ## Phase 1.1.2 stability validation
 
 FLAKY-001 was reproduced and traced to a transient `ESRCH` from `/proc/<pid>/stat` during group-member scanning. A deterministic test failed before the narrow fix and passed after it. Post-fix affected-test runs passed 100/100 normally and 50/50 with the race detector; full race and `scripts/check.sh` validation passed. See `phases/phase-01-1-2.md` for the original failure counts, exact commands, resource evidence and remaining limits. Final coverage is 76.6% overall versus 76.5% at phase start. Native CS2 validation remains pending. Branch `feat/process-lifecycle-hardening` is based on `8d32143`; Codex's `.git` mount is read-only and this phase's changes are unstaged.
+
+## Phase 1.2 current status
+
+The historical sections above describe earlier phases and their then-current limits. Phase 1.2 now requires an owner-only operator `policy.json`, generates a private bearer token, protects all API routes, limits HTTP resources and instance registration, validates exact executable identity and trusted roots, redacts known log secrets, and preflights Linux supervision before launch. See [security model](SECURITY.md) and [Phase 1.2 report](phases/phase-01-2.md). JSON persistence and the existing lifecycle manager remain. Native CS2 validation remains pending. Codex's `.git` mount is read-only; work is unstaged on `feat/security-hardening` at `7f68f77`.

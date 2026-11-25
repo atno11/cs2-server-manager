@@ -15,7 +15,7 @@ func fixture(t *testing.T) (*Manager, string, string) {
 	if err := os.WriteFile(exe, []byte("#!/bin/sh\necho started\nwhile true; do sleep 1; done\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	m, err := New(filepath.Join(root, "data"))
+	m, err := New(filepath.Join(root, "data"), Policy{Executables: []string{exe}, ExecutableRoots: []string{root}, WorkRoots: []string{root}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestLifecyclePersistenceAndValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitState(t, m, "one", "stopped")
-	m2, err := New(filepath.Join(root, "data"))
+	m2, err := New(filepath.Join(root, "data"), Policy{Executables: []string{exe}, ExecutableRoots: []string{root}, WorkRoots: []string{root}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,20 +88,16 @@ func TestLifecyclePersistenceAndValidation(t *testing.T) {
 	}
 }
 func TestUnexpectedExitAndLogs(t *testing.T) {
-	m, _, root := fixture(t)
-	exe := filepath.Join(root, "exit.sh")
-	if err := os.WriteFile(exe, []byte("#!/bin/sh\necho tokenless-output\nexit 2\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.Register(Definition{ID: "exit", Executable: exe, WorkDir: root, Port: 27017}); err != nil {
-		t.Fatal(err)
-	}
+	m, d := scriptFixture(t, "echo tokenless-output; exit 2")
+	d.ID = "exit"
+	d.Port = 27017
+	add(t, m, d)
 	if err := m.Start("exit"); err != nil {
 		t.Fatal(err)
 	}
 	waitState(t, m, "exit", "failed")
-	s, _ := m.Logs("exit")
-	if !strings.Contains(s, "tokenless-output") {
+	output, _ := m.Logs("exit")
+	if !strings.Contains(output, "tokenless-output") {
 		t.Fatal("output not captured")
 	}
 	r := newRing()

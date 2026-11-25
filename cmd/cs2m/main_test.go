@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/atno11/cs2-server-manager/internal/manager"
+	"github.com/atno11/cs2-server-manager/internal/security"
 )
 
 func TestAPI(t *testing.T) {
@@ -24,30 +25,30 @@ func TestAPI(t *testing.T) {
 	if err := os.WriteFile(exe, []byte("#!/bin/sh\necho hello\nexit 1\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	m, err := manager.New(filepath.Join(dir, "data"))
+	m, token, err := testManager(dir, exe)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer m.Close()
-	h := handler(m)
+	h := handler(m, token, "example.com")
 	body := `{"id":"one","executable":"` + exe + `","work_dir":"` + dir + `","port":27015}`
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("POST", "/api/instances", strings.NewReader(body)))
+	h.ServeHTTP(w, authorizedRequest("POST", "/api/instances", strings.NewReader(body), token, true))
 	if w.Code != 201 {
 		t.Fatalf("register: %d %s", w.Code, w.Body.String())
 	}
 	w = httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("GET", "/api/instances/one", nil))
+	h.ServeHTTP(w, authorizedRequest("GET", "/api/instances/one", nil, token, false))
 	if w.Code != 200 {
 		t.Fatalf("inspect: %d", w.Code)
 	}
 	w = httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("GET", "/api/instances/one/logs", nil))
+	h.ServeHTTP(w, authorizedRequest("GET", "/api/instances/one/logs", nil, token, false))
 	if w.Code != 200 || w.Header().Get("Content-Type") != "text/plain; charset=utf-8" {
 		t.Fatalf("logs: %d %s", w.Code, w.Body.String())
 	}
 	w = httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("DELETE", "/api/instances/one", nil))
+	h.ServeHTTP(w, authorizedRequest("DELETE", "/api/instances/one", nil, token, false))
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("delete: %d", w.Code)
 	}
@@ -59,7 +60,7 @@ func TestHTTPShutdownCoordinatesManager(t *testing.T) {
 	if err := os.WriteFile(exe, []byte("#!/bin/sh\necho ready\nwhile :; do sleep 1; done\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	m, err := manager.New(filepath.Join(dir, "data"))
+	m, token, err := testManager(dir, exe)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +70,7 @@ func TestHTTPShutdownCoordinatesManager(t *testing.T) {
 	}
 	listener := &pipeListener{connections: make(chan net.Conn), closed: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
-	srv := &http.Server{Handler: handler(m)}
+	srv := &http.Server{Handler: handler(m, token, "localhost")}
 	done := make(chan error, 1)
 	go func() { done <- serve(ctx, srv, listener, m) }()
 	request := func(method, path string) *http.Response {
@@ -80,7 +81,7 @@ func TestHTTPShutdownCoordinatesManager(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("listener unavailable")
 		}
-		if _, err := io.WriteString(client, method+" "+path+" HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"); err != nil {
+		if _, err := io.WriteString(client, method+" "+path+" HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer "+token+"\r\nContent-Length: 0\r\n\r\n"); err != nil {
 			t.Fatal(err)
 		}
 		resp, err := http.ReadResponse(bufio.NewReader(client), nil)
@@ -142,7 +143,8 @@ func (a pipeAddr) Network() string { return string(a) }
 func (a pipeAddr) String() string  { return string(a) }
 
 func TestHTTPShutdownErrorPropagates(t *testing.T) {
-	m, err := manager.New(filepath.Join(t.TempDir(), "data"))
+	root := t.TempDir()
+	m, _, err := testManager(root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +180,8 @@ func TestHTTPShutdownErrorPropagates(t *testing.T) {
 	}
 }
 func TestHTTPShutdownDeadlinePropagates(t *testing.T) {
-	m, err := manager.New(filepath.Join(t.TempDir(), "data"))
+	root := t.TempDir()
+	m, _, err := testManager(root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,4 +219,31 @@ func TestHTTPShutdownDeadlinePropagates(t *testing.T) {
 		t.Fatal("active connection not closed")
 	}
 	_ = client.Close()
+}
+
+func testManager(root, exe string) (*manager.Manager, string, error) {
+	if exe == "" {
+		exe = filepath.Join(root, "fake.sh")
+		if err := os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+			return nil, "", err
+		}
+	}
+	data := filepath.Join(root, "data")
+	if err := os.MkdirAll(data, 0700); err != nil {
+		return nil, "", err
+	}
+	token, err := security.LoadOrCreateToken(data)
+	if err != nil {
+		return nil, "", err
+	}
+	m, err := manager.New(data, manager.Policy{Executables: []string{exe}, ExecutableRoots: []string{root}, WorkRoots: []string{root}, KnownSecrets: []string{token}})
+	return m, token, err
+}
+func authorizedRequest(method, path string, body io.Reader, token string, jsonBody bool) *http.Request {
+	r := httptest.NewRequest(method, path, body)
+	r.Header.Set("Authorization", "Bearer "+token)
+	if jsonBody {
+		r.Header.Set("Content-Type", "application/json")
+	}
+	return r
 }

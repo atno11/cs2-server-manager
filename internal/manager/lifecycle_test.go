@@ -21,7 +21,7 @@ func scriptFixture(t *testing.T, body string) (*Manager, Definition) {
 	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"+body+"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	m, err := New(filepath.Join(root, "data"))
+	m, err := New(filepath.Join(root, "data"), Policy{Executables: []string{exe}, ExecutableRoots: []string{root}, WorkRoots: []string{root}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,10 +157,15 @@ func TestExitClassificationAndLaunchRecovery(t *testing.T) {
 	if err := os.WriteFile(d.Executable, []byte("#!/bin/sh\necho ready; while :; do sleep 1; done\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Start(d.ID); err != nil {
+	m2, err := New(filepath.Join(d.WorkDir, "data"), Policy{Executables: []string{d.Executable}, ExecutableRoots: []string{d.WorkDir}, WorkRoots: []string{d.WorkDir}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Stop(d.ID); err != nil {
+	defer m2.Close()
+	if err := m2.Start(d.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := m2.Stop(d.ID); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -346,10 +351,18 @@ func TestRestartConflictsAndIndependentInstance(t *testing.T) {
 	}
 }
 func TestExecFailureRecovery(t *testing.T) {
-	m, d := scriptFixture(t, "exit 0")
-	if err := os.WriteFile(d.Executable, []byte("invalid shell content without shebang\n"), 0700); err != nil {
+	root := t.TempDir()
+	exe := filepath.Join(root, "invalid.sh")
+	if err := os.WriteFile(exe, []byte("invalid executable format\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
+	policy := Policy{Executables: []string{exe}, ExecutableRoots: []string{root}, WorkRoots: []string{root}}
+	m, err := New(filepath.Join(root, "data"), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	d := Definition{ID: "one", Executable: exe, WorkDir: root, Port: 27015}
 	add(t, m, d)
 	if err := m.Start(d.ID); err == nil {
 		t.Fatal("exec format accepted")
@@ -358,16 +371,25 @@ func TestExecFailureRecovery(t *testing.T) {
 	if v.State != "failed" || v.Error == "" {
 		t.Fatalf("launch failure state: %+v", v)
 	}
-	if err := os.WriteFile(d.Executable, []byte("#!/bin/sh\necho ready; while :; do sleep 1; done\n"), 0700); err != nil {
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\necho ready; while :; do sleep 1; done\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Start(d.ID); err != nil {
+	if err := m.Start(d.ID); err == nil {
+		t.Fatal("changed trusted executable accepted without policy reload")
+	}
+	m2, err := New(filepath.Join(root, "data"), policy)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Stop(d.ID); err != nil {
+	defer m2.Close()
+	if err := m2.Start(d.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := m2.Stop(d.ID); err != nil {
 		t.Fatal(err)
 	}
 }
+
 func TestStaleCompletionCannotReplaceState(t *testing.T) {
 	m, d := scriptFixture(t, "exit 0")
 	add(t, m, d)

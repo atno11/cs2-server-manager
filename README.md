@@ -1,24 +1,35 @@
-# CS2 Server Manager MVP
+# CS2 Server Manager
 
-Local, single-host CS2 process manager. Run as an unprivileged user with `go run ./cmd/cs2m`. The API and web UI listen on `127.0.0.1:8080` by default. Set `CS2M_ADDR` to another loopback address and `CS2M_DATA` to a private data directory if needed. Public bind addresses are rejected. State is stored in `instances.json` with mode 0600. Running processes are stopped on manager shutdown and are not resumed automatically.
+Linux single-host CS2 process manager. Run as an unprivileged user. The HTTP server listens on `127.0.0.1:8080` by default; `CS2M_ADDR` may select another numeric loopback address. `CS2M_DATA` selects the private runtime directory (default `~/.local/share/cs2m`). Public binds are rejected. Go 1.27 and Linux pidfd group signaling with readable `/proc` are required.
+
+## Operator setup
+
+Create a private runtime directory and a mode 0600 `policy.json` before starting the manager. Paths must be absolute, canonical, and free of symlink components. The executable and working roots must exist. Working directories are owned by the manager user and are not group or world writable; executable trees and files must be owned by root or the manager user and cannot be group or world writable.
+
+```json
+{
+  "executables": ["/srv/cs2/game/bin/linuxsteamrt64/cs2"],
+  "executable_roots": ["/srv/cs2"],
+  "work_roots": ["/srv/cs2-instances"],
+  "base_args": [],
+  "known_secrets": []
+}
+```
+
+The exact executable path is pinned by device, inode and SHA-256 digest for the manager lifetime. Changing it requires an operator policy review and manager restart. The manager revalidates the pinned file before every start and launches through its open descriptor. Existing unsafe files or directories cause an explicit failure; permissions are not silently changed.
+
+On first start, the manager generates a random 0600 `admin.token` in the runtime directory. Read this file locally as the administrator, enter its value in the web UI, or send it in an `Authorization: Bearer` header from a programmatic client. Keep it out of URLs, shell history and logs. The UI holds the token only in page memory; closing or refreshing the page clears it. All `/api/` routes require it. The token is not printed by the application. See [security policy](docs/SECURITY.md) for the threat model and limitations.
 
 ## API
 
-- `GET /api/instances` lists definitions and states.
-- `POST /api/instances` registers a definition: `{"id":"match1","executable":"/absolute/path/to/cs2","work_dir":"/absolute/path/to/server","port":27015,"args":["+map","de_dust2"]}`.
-- `GET /api/instances/{id}` inspects one instance.
-- `DELETE /api/instances/{id}` removes a stopped instance.
-- `POST /api/instances/{id}/start`, `/stop`, or `/restart` changes its state.
-- `GET /api/instances/{id}/logs` returns the last 64 KiB of captured output.
+- `GET /api/instances` lists public states.
+- `POST /api/instances` registers an instance using JSON: `{"id":"match1","executable":"/srv/cs2/game/bin/linuxsteamrt64/cs2","work_dir":"/srv/cs2-instances/match1","port":27015,"args":[]}`.
+- `GET /api/instances/{id}` inspects an instance; `DELETE` removes a stopped one.
+- `POST /api/instances/{id}/start`, `/stop`, and `/restart` control it.
+- `GET /api/instances/{id}/logs` returns the last 64 KiB of redacted output.
 
-Executable and working directory must already exist. Arguments are passed directly to the process, with `-port <port>` appended by the manager. Shell execution and Steam downloads are not used. Avoid putting secrets in arguments: operating system process inspection can expose them. Use separate working directories and configuration files for each instance.
+The HTTP `args` field accepts only limited positional values. Operator-controlled CS2 flags belong in `base_args`; the manager appends `-port <port>`. Each instance uses its own existing working directory. Definitions persist in a private `instances.json` file. Running processes are stopped on orderly manager shutdown and are not resumed automatically. Remote agents, downloads, SQLite and SSE are deferred.
 
-## Development baseline
+## Development
 
-The current MVP predates the approved SQLite and SSE architecture. These are planned for a later implementation phase. Read `docs/ARCHITECTURE.md`, `docs/PROJECT_STATUS.md`, `docs/TESTING.md`, and `docs/ROADMAP.md` before changing behavior. Run `scripts/check.sh` for the full baseline. The host initialized Git on `main` and ran `scripts/check.sh` successfully. Codex can read the repository but its `.git` mount remains read-only, so staging and committing require host-side access. Native CS2 tests remain pending.
-
-## Lifecycle behavior
-
-The manager allows one lifecycle operation per instance at a time. Conflicting requests return an error; independent instances can proceed. Stopping sends SIGTERM to the instance's Linux process group, then SIGKILL after two seconds, with a further two-second completion bound. Forced termination and timeout errors are visible in instance state. Manager shutdown rejects new mutations and stops active instances concurrently. Process-group supervision cannot reclaim detached descendants or processes left by abrupt manager termination. See `docs/phases/phase-01-1.md`.
-
-Lifecycle review update: this build requires Linux 6.9+ pidfd process-group signaling and readable `/proc` for confirmed group cleanup. `Close` returns cleanup errors; forced termination can be followed by a restart once cleanup is confirmed, with diagnostics retained in `last_termination`. See `docs/phases/phase-01-1-1.md`.
+Read [architecture](docs/ARCHITECTURE.md), [status](docs/PROJECT_STATUS.md), [testing](docs/TESTING.md), and [roadmap](docs/ROADMAP.md) before changing behavior. Run `bash scripts/check.sh` for the full regression baseline. Native CS2 validation remains pending.
