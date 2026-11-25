@@ -19,7 +19,7 @@ func fixture(t *testing.T) (*Manager, string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(m.Close)
+	t.Cleanup(func() { _ = m.Close() })
 	return m, exe, root
 }
 func waitState(t *testing.T, m *Manager, id, state string) {

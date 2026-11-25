@@ -1,7 +1,6 @@
 package manager
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,9 +10,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 type Definition struct {
@@ -25,25 +27,37 @@ type Definition struct {
 }
 type Instance struct {
 	Definition
-	State string `json:"state"`
-	Error string `json:"error,omitempty"`
+	State           string `json:"state"`
+	Error           string `json:"error,omitempty"`
+	LastTermination string `json:"last_termination,omitempty"`
 }
 type process struct {
-	cmd    *exec.Cmd
-	cancel context.CancelFunc
-	done   chan struct{}
+	cmd       *exec.Cmd
+	done      chan struct{}
+	pgid      int
+	pidfd     int
+	exited    bool
+	termAt    time.Time
+	killSent  bool
+	stopping  bool
+	forced    bool
+	signalErr error
 }
 type entry struct {
-	def        Definition
-	state, err string
-	proc       *process
-	log        *ring
+	def             Definition
+	state, err, op  string
+	lastTermination string
+	proc            *process
+	log             *ring
 }
 type Manager struct {
-	mu      sync.Mutex
-	entries map[string]*entry
-	path    string
-	closed  bool
+	mu        sync.Mutex
+	entries   map[string]*entry
+	path      string
+	closed    bool
+	closeDone chan struct{}
+	opWG      sync.WaitGroup
+	closeErr  error
 }
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -52,7 +66,7 @@ func New(dir string) (*Manager, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
-	m := &Manager{entries: map[string]*entry{}, path: filepath.Join(dir, "instances.json")}
+	m := &Manager{entries: map[string]*entry{}, path: filepath.Join(dir, "instances.json"), closeDone: make(chan struct{})}
 	b, err := os.ReadFile(m.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return m, nil
@@ -68,10 +82,12 @@ func New(dir string) (*Manager, error) {
 		if err = m.validate(d, ""); err != nil {
 			return nil, fmt.Errorf("stored %s: %w", d.ID, err)
 		}
-		m.entries[d.ID] = &entry{def: d, state: "stopped", log: newRing()}
+		m.entries[d.ID] = &entry{def: copyDefinition(d), state: "stopped", log: newRing()}
 	}
 	return m, nil
 }
+func copyDefinition(d Definition) Definition { d.Args = slices.Clone(d.Args); return d }
+
 func (m *Manager) validate(d Definition, except string) error {
 	if !idPattern.MatchString(d.ID) {
 		return errors.New("invalid ID")
@@ -162,7 +178,7 @@ func (m *Manager) Register(d Definition) error {
 	if err := m.validate(d, ""); err != nil {
 		return err
 	}
-	m.entries[d.ID] = &entry{def: d, state: "stopped", log: newRing()}
+	m.entries[d.ID] = &entry{def: copyDefinition(d), state: "stopped", log: newRing()}
 	if err := m.save(); err != nil {
 		delete(m.entries, d.ID)
 		return err
@@ -172,11 +188,14 @@ func (m *Manager) Register(d Definition) error {
 func (m *Manager) Remove(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return errors.New("manager closed")
+	}
 	e := m.entries[id]
 	if e == nil {
 		return os.ErrNotExist
 	}
-	if e.proc != nil {
+	if e.proc != nil || e.op != "" {
 		return errors.New("instance is active")
 	}
 	delete(m.entries, id)
@@ -186,7 +205,9 @@ func (m *Manager) Remove(id string) error {
 	}
 	return nil
 }
-func view(e *entry) Instance { return Instance{Definition: e.def, State: e.state, Error: e.err} }
+func view(e *entry) Instance {
+	return Instance{Definition: copyDefinition(e.def), State: e.state, Error: e.err, LastTermination: e.lastTermination}
+}
 func (m *Manager) List() []Instance {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -222,118 +243,435 @@ func (m *Manager) Logs(id string) (string, error) {
 	}
 	return e.log.String(), nil
 }
-func (m *Manager) Start(id string) error {
+
+const gracefulTimeout = 2 * time.Second
+const forcedTimeout = 2 * time.Second
+
+func (m *Manager) reserve(id, op string) (*entry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
-		return errors.New("manager closed")
+		return nil, errors.New("manager closed")
 	}
 	e := m.entries[id]
 	if e == nil {
-		return os.ErrNotExist
+		return nil, os.ErrNotExist
+	}
+	if e.op != "" {
+		return nil, errors.New("instance operation in progress")
+	}
+	if op == "start" && e.proc != nil {
+		return nil, errors.New("instance is active")
+	}
+	if op == "stop" && e.proc == nil {
+		return nil, errors.New("instance is not running")
+	}
+	e.op = op
+	m.opWG.Add(1)
+	return e, nil
+}
+func (m *Manager) release(e *entry) {
+	m.mu.Lock()
+	e.op = ""
+	m.mu.Unlock()
+	m.opWG.Done()
+}
+func (m *Manager) Start(id string) error {
+	e, err := m.reserve(id, "start")
+	if err != nil {
+		return err
+	}
+	defer m.release(e)
+	return m.startReserved(e)
+}
+func (m *Manager) startReserved(e *entry) error {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return errors.New("manager closed")
 	}
 	if e.proc != nil {
+		m.mu.Unlock()
 		return errors.New("instance is active")
 	}
-	if err := m.validate(e.def, id); err != nil {
+	if err := m.validate(e.def, e.def.ID); err != nil {
+		m.mu.Unlock()
 		return err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	args := append(slices.Clone(e.def.Args), "-port", fmt.Sprint(e.def.Port))
-	cmd := exec.CommandContext(ctx, e.def.Executable, args...)
-	cmd.Dir = e.def.WorkDir
-	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
-	cmd.WaitDelay = 5 * time.Second
-	cmd.Stdout = e.log
-	cmd.Stderr = e.log
+	d := copyDefinition(e.def)
+	m.mu.Unlock()
+	args := append(d.Args, "-port", fmt.Sprint(d.Port))
+	cmd := exec.Command(d.Executable, args...)
+	cmd.Dir = d.WorkDir
+	pidfd := -1
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, PidFD: &pidfd}
+	cmd.WaitDelay = time.Second
+	cmd.Stdout, cmd.Stderr = e.log, e.log
 	if err := cmd.Start(); err != nil {
-		cancel()
+		m.mu.Lock()
 		e.state = "failed"
 		e.err = err.Error()
+		m.mu.Unlock()
 		return err
 	}
-	p := &process{cmd: cmd, cancel: cancel, done: make(chan struct{})}
+	if pidfd < 0 {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return errors.New("Linux pidfd unavailable")
+	}
+	if err := pidfdSignalGroup(pidfd, 0); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		_ = syscall.Close(pidfd)
+		return fmt.Errorf("pidfd process-group signaling unavailable: %w", err)
+	}
+	p := &process{cmd: cmd, done: make(chan struct{}), pgid: cmd.Process.Pid, pidfd: pidfd}
+	m.mu.Lock()
 	e.proc = p
 	e.state = "running"
 	e.err = ""
-	go m.wait(id, p)
+	shuttingDown := m.closed
+	m.mu.Unlock()
+	go m.wait(e, p)
+	if shuttingDown {
+		result := m.terminate(e, p)
+		return errors.Join(errors.New("manager closed"), result.err)
+	}
 	return nil
 }
-func (m *Manager) wait(id string, p *process) {
-	err := p.cmd.Wait()
-	p.cancel()
+
+// waitLeader observes exit without reaping. The zombie leader anchors its group ID
+// until all owned group signaling is finished and cmd.Wait reaps it.
+func waitLeader(pid int) error {
+	var info [128]byte
+	for {
+		_, _, errno := syscall.Syscall6(syscall.SYS_WAITID, 1, uintptr(pid), uintptr(unsafe.Pointer(&info[0])), uintptr(syscall.WEXITED|syscall.WNOWAIT), 0, 0)
+		if errno == syscall.EINTR {
+			continue
+		}
+		if errno != 0 {
+			return errno
+		}
+		return nil
+	}
+}
+
+const pidfdSignalProcessGroup = 4
+const sysPidfdSendSignal = 424 // Linux syscall number on supported Linux architectures.
+func pidfdSignalGroup(fd int, sig syscall.Signal) error {
+	if fd < 0 {
+		return errors.New("invalid pidfd")
+	}
+	_, _, errno := syscall.Syscall6(sysPidfdSendSignal, uintptr(fd), uintptr(sig), 0, pidfdSignalProcessGroup, 0, 0)
+	if errno == syscall.ESRCH {
+		return nil
+	}
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+// groupHasLiveMembers excludes the unreaped leader and zombie descendants.
+func groupHasLiveMembers(pgid, leader int) (bool, error) {
+	dirs, err := os.ReadDir("/proc")
+	if err != nil {
+		return false, err
+	}
+	return scanGroupMembers(dirs, os.ReadFile, pgid, leader)
+}
+func scanGroupMembers(dirs []os.DirEntry, readStat func(string) ([]byte, error), pgid, leader int) (bool, error) {
+	for _, d := range dirs {
+		pid, err := strconv.Atoi(d.Name())
+		if err != nil || pid == leader {
+			continue
+		}
+		b, err := readStat("/proc/" + d.Name() + "/stat")
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		rest := string(b)
+		i := strings.LastIndex(rest, ") ")
+		if i < 0 {
+			continue
+		}
+		fields := strings.Fields(rest[i+2:])
+		if len(fields) < 3 {
+			continue
+		}
+		group, err := strconv.Atoi(fields[2])
+		if err == nil && group == pgid && fields[0] != "Z" && fields[0] != "X" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+func (m *Manager) wait(e *entry, p *process) {
+	observedErr := waitLeader(p.cmd.Process.Pid)
 	m.mu.Lock()
-	e := m.entries[id]
-	if e != nil && e.proc == p {
-		e.proc = nil
-		if e.state == "stopping" {
+	p.exited = true
+	m.mu.Unlock()
+	cleanupErr := observedErr
+	if observedErr == nil {
+		cleanupErr = m.cleanupGroup(e, p)
+	}
+	err := p.cmd.Wait()
+	_ = syscall.Close(p.pidfd)
+	m.mu.Lock()
+	if e.proc == p {
+		if cleanupErr == nil {
+			e.proc = nil
+		}
+		switch {
+		case cleanupErr != nil:
+			e.state = "failed"
+			e.err = "process-group cleanup: " + cleanupErr.Error()
+		case p.signalErr != nil:
+			e.state = "failed"
+			e.err = p.signalErr.Error()
+		case p.forced:
+			e.state = "failed"
+			e.err = "forced termination after graceful timeout"
+		case p.stopping:
 			e.state = "stopped"
 			e.err = ""
-		} else {
+		case err == nil || (errors.Is(err, exec.ErrWaitDelay) && p.cmd.ProcessState != nil && p.cmd.ProcessState.Success()):
+			e.state = "stopped"
+			e.err = ""
+		default:
 			e.state = "failed"
-			if err != nil {
-				e.err = err.Error()
-			} else {
-				e.err = "process exited"
-			}
+			e.err = err.Error()
+		}
+		if p.forced {
+			e.lastTermination = "forced termination after graceful timeout"
+		}
+		if cleanupErr != nil {
+			e.lastTermination = "process-group cleanup: " + cleanupErr.Error()
 		}
 	}
 	close(p.done)
 	m.mu.Unlock()
 }
-func (m *Manager) Stop(id string) error {
-	m.mu.Lock()
-	e := m.entries[id]
-	if e == nil {
-		m.mu.Unlock()
-		return os.ErrNotExist
+func (m *Manager) cleanupGroup(e *entry, p *process) error {
+	live, err := groupHasLiveMembers(p.pgid, p.cmd.Process.Pid)
+	if err != nil {
+		return err
 	}
-	p := e.proc
-	if p == nil {
-		m.mu.Unlock()
-		return errors.New("instance is not running")
-	}
-	e.state = "stopping"
-	p.cancel()
-	m.mu.Unlock()
-	select {
-	case <-p.done:
-		return nil
-	case <-time.After(10 * time.Second):
-		_ = p.cmd.Process.Kill()
-		<-p.done
+	if !live {
 		return nil
 	}
-}
-func (m *Manager) Restart(id string) error {
 	m.mu.Lock()
-	e := m.entries[id]
-	if e == nil {
-		m.mu.Unlock()
-		return os.ErrNotExist
+	if p.termAt.IsZero() {
+		p.termAt = time.Now()
+		err = pidfdSignalGroup(p.pidfd, syscall.SIGTERM)
+		if err != nil {
+			p.signalErr = err
+		}
 	}
-	active := e.proc != nil
+	deadline := p.termAt.Add(gracefulTimeout)
 	m.mu.Unlock()
-	if active {
-		if err := m.Stop(id); err != nil {
+	if err != nil {
+		return err
+	}
+	for time.Now().Before(deadline) {
+		live, err = groupHasLiveMembers(p.pgid, p.cmd.Process.Pid)
+		if err != nil {
 			return err
 		}
+		if !live {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	return m.Start(id)
-}
-func (m *Manager) Close() {
 	m.mu.Lock()
-	m.closed = true
-	ids := make([]string, 0)
-	for id, e := range m.entries {
-		if e.proc != nil {
-			ids = append(ids, id)
+	if !p.killSent {
+		p.killSent = true
+		p.forced = true
+		err = pidfdSignalGroup(p.pidfd, syscall.SIGKILL)
+		if err != nil {
+			p.signalErr = err
 		}
 	}
 	m.mu.Unlock()
-	for _, id := range ids {
-		_ = m.Stop(id)
+	if err != nil {
+		return err
 	}
+	deadline = time.Now().Add(forcedTimeout)
+	for time.Now().Before(deadline) {
+		live, err = groupHasLiveMembers(p.pgid, p.cmd.Process.Pid)
+		if err != nil {
+			return err
+		}
+		if !live {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return errors.New("owned process group remained active after SIGKILL")
+}
+
+type terminationResult struct {
+	confirmed, forced, replaceable bool
+	err                            error
+}
+
+func (m *Manager) terminate(e *entry, p *process) terminationResult {
+	m.mu.Lock()
+	if e.proc != p {
+		if e.proc == nil {
+			result := terminationResult{confirmed: true}
+			if e.state == "failed" {
+				result.err = errors.New(e.err)
+			}
+			m.mu.Unlock()
+			return result
+		}
+		m.mu.Unlock()
+		return terminationResult{err: errors.New("stale process ownership")}
+	}
+	if !p.exited {
+		p.stopping = true
+		e.state = "stopping"
+		if p.termAt.IsZero() {
+			p.termAt = time.Now()
+			if err := pidfdSignalGroup(p.pidfd, syscall.SIGTERM); err != nil {
+				p.signalErr = err
+			}
+		}
+	}
+	termAt := p.termAt
+	m.mu.Unlock()
+	if termAt.IsZero() { // Natural exit already observed; waiter owns descendant cleanup.
+		select {
+		case <-p.done:
+			return m.terminationResult(e, p)
+		case <-time.After(gracefulTimeout + forcedTimeout + time.Second):
+			return terminationResult{err: errors.New("process completion timed out")}
+		}
+	}
+	timer := time.NewTimer(time.Until(termAt.Add(gracefulTimeout)))
+	defer timer.Stop()
+	select {
+	case <-p.done:
+		return m.terminationResult(e, p)
+	case <-timer.C:
+	}
+	m.mu.Lock()
+	if e.proc == p && !p.exited && !p.killSent {
+		p.killSent = true
+		p.forced = true
+		if err := pidfdSignalGroup(p.pidfd, syscall.SIGKILL); err != nil {
+			p.signalErr = err
+		}
+	}
+	m.mu.Unlock()
+	killTimer := time.NewTimer(forcedTimeout + time.Second)
+	defer killTimer.Stop()
+	select {
+	case <-p.done:
+		return m.terminationResult(e, p)
+	case <-killTimer.C:
+		m.mu.Lock()
+		if e.proc == p {
+			e.state = "failed"
+			e.err = "process did not exit after forced termination"
+		}
+		m.mu.Unlock()
+		return terminationResult{err: errors.New("process termination timed out")}
+	}
+}
+func (m *Manager) terminationResult(e *entry, p *process) terminationResult {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e.proc == p {
+		return terminationResult{err: errors.New("process completion unconfirmed")}
+	}
+	if e.state == "failed" {
+		return terminationResult{confirmed: true, forced: p.forced, replaceable: p.forced && p.signalErr == nil && e.err == "forced termination after graceful timeout", err: errors.New(e.err)}
+	}
+	return terminationResult{confirmed: true, forced: p.forced}
+}
+func (m *Manager) Stop(id string) error {
+	e, err := m.reserve(id, "stop")
+	if err != nil {
+		return err
+	}
+	defer m.release(e)
+	m.mu.Lock()
+	p := e.proc
+	m.mu.Unlock()
+	if p == nil {
+		return errors.New("instance is not running")
+	}
+	return m.terminate(e, p).err
+}
+func (m *Manager) Restart(id string) error {
+	e, err := m.reserve(id, "restart")
+	if err != nil {
+		return err
+	}
+	defer m.release(e)
+	m.mu.Lock()
+	p := e.proc
+	m.mu.Unlock()
+	if p != nil {
+		result := m.terminate(e, p)
+		if !result.confirmed || (result.err != nil && !result.replaceable) {
+			return result.err
+		}
+	}
+	return m.startReserved(e)
+}
+func (m *Manager) Close() error {
+	m.mu.Lock()
+	if m.closed {
+		done := m.closeDone
+		m.mu.Unlock()
+		<-done
+		m.mu.Lock()
+		err := m.closeErr
+		m.mu.Unlock()
+		return err
+	}
+	m.closed = true
+	m.mu.Unlock()
+	m.opWG.Wait()
+	m.mu.Lock()
+	active := make([]struct {
+		e *entry
+		p *process
+	}, 0)
+	for _, e := range m.entries {
+		if e.proc != nil {
+			active = append(active, struct {
+				e *entry
+				p *process
+			}{e, e.proc})
+		}
+	}
+	m.mu.Unlock()
+	errs := make([]error, len(active))
+	var wg sync.WaitGroup
+	for i, item := range active {
+		wg.Add(1)
+		go func(i int, e *entry, p *process) {
+			defer wg.Done()
+			result := m.terminate(e, p)
+			if result.err != nil {
+				errs[i] = fmt.Errorf("%s: %w", e.def.ID, result.err)
+			}
+		}(i, item.e, item.p)
+	}
+	wg.Wait()
+	m.mu.Lock()
+	m.closeErr = errors.Join(errs...)
+	close(m.closeDone)
+	err := m.closeErr
+	m.mu.Unlock()
+	return err
 }
 
 const logLimit = 64 * 1024

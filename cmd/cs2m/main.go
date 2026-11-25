@@ -35,7 +35,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer m.Close()
 	addr := os.Getenv("CS2M_ADDR")
 	if addr == "" {
 		addr = "127.0.0.1:8080"
@@ -47,17 +46,42 @@ func main() {
 	srv := &http.Server{Addr: addr, Handler: handler(m), ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	go func() {
-		<-ctx.Done()
-		c, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(c)
-	}()
-	log.Printf("listening on %s", addr)
-	if err = srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatal(errors.Join(err, m.Close()))
+	}
+	log.Printf("listening on %s", listener.Addr())
+	if err := serve(ctx, srv, listener, m); err != nil {
 		log.Fatal(err)
 	}
+
 }
+func serve(ctx context.Context, srv *http.Server, listener net.Listener, m *manager.Manager) error {
+	return serveWithTimeout(ctx, srv, listener, m, 15*time.Second)
+}
+func serveWithTimeout(ctx context.Context, srv *http.Server, listener net.Listener, m *manager.Manager, timeout time.Duration) error {
+	ctx, cancel := context.WithCancel(ctx)
+	shutdownResult := make(chan error, 1)
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, finish := context.WithTimeout(context.Background(), timeout)
+		defer finish()
+		err := srv.Shutdown(shutdownCtx)
+		if err != nil {
+			err = errors.Join(err, srv.Close())
+		}
+		shutdownResult <- err
+	}()
+	serveErr := srv.Serve(listener)
+	cancel()
+	shutdownErr := <-shutdownResult
+	closeErr := m.Close()
+	if errors.Is(serveErr, http.ErrServerClosed) {
+		serveErr = nil
+	}
+	return errors.Join(serveErr, shutdownErr, closeErr)
+}
+
 func handler(m *manager.Manager) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {

@@ -16,3 +16,9 @@ Executable and working directory must already exist. Arguments are passed direct
 ## Development baseline
 
 The current MVP predates the approved SQLite and SSE architecture. These are planned for a later implementation phase. Read `docs/ARCHITECTURE.md`, `docs/PROJECT_STATUS.md`, `docs/TESTING.md`, and `docs/ROADMAP.md` before changing behavior. Run `scripts/check.sh` for the full baseline. The host initialized Git on `main` and ran `scripts/check.sh` successfully. Codex can read the repository but its `.git` mount remains read-only, so staging and committing require host-side access. Native CS2 tests remain pending.
+
+## Lifecycle behavior
+
+The manager allows one lifecycle operation per instance at a time. Conflicting requests return an error; independent instances can proceed. Stopping sends SIGTERM to the instance's Linux process group, then SIGKILL after two seconds, with a further two-second completion bound. Forced termination and timeout errors are visible in instance state. Manager shutdown rejects new mutations and stops active instances concurrently. Process-group supervision cannot reclaim detached descendants or processes left by abrupt manager termination. See `docs/phases/phase-01-1.md`.
+
+Lifecycle review update: this build requires Linux 6.9+ pidfd process-group signaling and readable `/proc` for confirmed group cleanup. `Close` returns cleanup errors; forced termination can be followed by a restart once cleanup is confirmed, with diagnostics retained in `last_termination`. See `docs/phases/phase-01-1-1.md`.
