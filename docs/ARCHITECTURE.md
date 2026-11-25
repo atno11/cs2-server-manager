@@ -24,4 +24,4 @@ The local operator supplies `policy.json`, defining exact executable identities 
 
 ## Phase 1.2.1 review correction
 
-The trust-policy boundaries are rechecked at each launch, including root metadata and executable privilege attributes. All JSON input paths use duplicate-key detection. Persisted definitions are bounded before loading. The redactor tracks overlapping secret intervals and is also applied to app-generated API responses. Descriptor execution retains the authorized path in `argv[0]`; native CS2 compatibility is still unverified. See `phases/phase-01-2-1.md`.
+The trust-policy boundaries are rechecked at each launch, including root metadata and executable privilege attributes. All JSON input paths use duplicate-key detection. Persisted definitions are bounded before loading. The redactor tracks overlapping secret intervals in captured logs; public instance values are validated before serialization, and API errors have no body. Descriptor execution retains the authorized path in `argv[0]`; native CS2 compatibility is still unverified. See `phases/phase-01-2-1.md`.

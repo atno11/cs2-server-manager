@@ -15,3 +15,6 @@ Phase 1.1.2 established FLAKY-001 as transient `/proc` `ESRCH` during member sca
 Phase 1.2 adds isolated HTTP, trust-policy, credential, redaction, permission and capability tests. Test fixtures explicitly authorize their fake executables. The phase report records the pre-change 29-test baseline, targeted/repeated race checks, final complete validation and coverage. `GOCACHE` and `GOTMPDIR` may be set to private temporary directories for direct Go commands when the sandbox's default Go cache is read-only.
 
 Phase 1.2.1 adds regression cases for overlapping secret intervals, changed trusted roots/executable metadata, persisted size/count, ambiguous JSON keys, public secret exposure, secret-count boundaries, and descriptor execution with a copied Go test executable. The controlled executable test validates Linux behavior in the test environment, not native CS2. The phase report records pre-fix failures, repeated race checks, and final results.
+
+
+The Phase 1.2.1 HTTP follow-up adds regression tests for schema stability with a known secret matching a JSON key, successful output above 64 KiB, and empty error bodies with preserved status codes and authentication challenges. Log bounds and split-write tests remain in the complete suite.

@@ -28,7 +28,7 @@ On first start, the manager generates a random 0600 `admin.token` in the runtime
 - `POST /api/instances/{id}/start`, `/stop`, and `/restart` control it.
 - `GET /api/instances/{id}/logs` returns the last 64 KiB of redacted output.
 
-The HTTP `args` field accepts only limited positional values. Operator-controlled CS2 flags belong in `base_args`; the manager appends `-port <port>`. Each instance uses its own existing working directory. Definitions persist in a private `instances.json` file; startup rejects duplicate JSON keys, more than 32 definitions, files over 512 KiB and individual compact definitions over 16 KiB. Running processes are stopped on orderly manager shutdown and are not resumed automatically. Remote agents, downloads, SQLite and SSE are deferred.
+API errors return status codes with empty bodies. The HTTP `args` field accepts only limited positional values. Operator-controlled CS2 flags belong in `base_args`; the manager appends `-port <port>`. Each instance uses its own existing working directory. Definitions persist in a private `instances.json` file; startup rejects duplicate JSON keys, more than 32 definitions, files over 512 KiB and individual compact definitions over 16 KiB. Running processes are stopped on orderly manager shutdown and are not resumed automatically. Remote agents, downloads, SQLite and SSE are deferred.
 
 ## Development
 

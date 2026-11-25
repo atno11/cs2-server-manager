@@ -55,3 +55,33 @@ Targeted post-fix `go test -count=1 -run '^TestReview' ./internal/manager ./cmd/
 Branch `feat/security-hardening`, HEAD `a0e8b20`; Codex's `.git` mount is read-only. No stage, commit, push, merge or deployment was performed in this phase.
 
 Final `GOCACHE=/tmp/cs2m-scr-cache GOTMPDIR=/tmp go test -race -count=3 -timeout=180s ./...` exited 0 across all three packages. Final `bash scripts/check.sh` exited 0: gofmt, vet, uncached tests, race, coverage generation, standard build and Git diff check all PASS. The suite contains 59 top-level tests (44 prior plus 15 new). Coverage: cmd 69.4%, manager 80.8%, security 74.4%, overall 78.6%, versus local pre-change 77.0% and published 76.9%. Coverage is diagnostic, not a gate. Native CS2 validation remains PENDING.
+
+## Final review follow-up — HTTP response contracts
+
+This fixed SRF checklist was recorded before follow-up application changes. All criteria begin PENDING; wording remains fixed.
+
+| ID | Criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| SRF-01 | JSON response schemas and field names remain stable regardless of configured known secrets. | PASS | `TestFollowupJSONSchemaIsStable`: registration, list and inspect keep `port` key with known secret `port`. |
+| SRF-02 | HTTP response redaction does not inherit the log ring's truncation semantics. | PASS | `TestFollowupHTTPOutputNotLogBounded`: 71,680-byte success body passes unchanged. |
+| SRF-03 | Known secrets remain protected in public response values and application-generated errors. | PASS | `TestFollowupErrorsHaveNoEchoedBody` and prior public value tests; 400/401/404/405 have empty bodies. |
+| SRF-04 | Existing bounded log and split-write redaction guarantees remain intact. | PASS | Existing split-write and bounded-log tests pass; log path no longer undergoes a second response pass. |
+| SRF-05 | Targeted tests, complete regression suite, race detector and scripts/check.sh pass. | PASS | 20-repeat targeted race, full race count=3, and `bash scripts/check.sh` exit 0; 62 tests. |
+
+### SRF investigation and pre-change evidence
+
+At follow-up start, branch `feat/security-hardening` was clean at `01c2669`. `bash scripts/check.sh` exited 0: gofmt, vet, uncached tests, race, coverage, build and Git diff check passed. The suite contained 59 top-level tests; local coverage was cmd 69.4%, manager 80.7%, security 74.4%, overall 78.5% (the prior phase report recorded 78.6%). Native CS2 validation was not run.
+
+`TestFollowupJSONSchemaIsStable` reproduced SRF-01: with synthetic known secret `port`, registration returned `{"[REDACTED]":27015}` instead of the `port` field. `TestFollowupHTTPOutputNotLogBounded` reproduced SRF-02: a 71,680-byte success body became 65,536 bytes. Both targeted tests failed before the fix (`go test -count=1 -run '^TestFollowup' ./cmd/cs2m`, exit 1). Inspection confirmed the already-redacted log result was passed through a second redaction pass; this was redundant, but no distinct leak or mutation from the second pass was reproduced. Serialized secret spelling can differ from raw input, so whole-JSON string scanning was not accepted as a reliable value-level control.
+
+### SRF correction
+
+The response capture and `Manager.RedactPublic` were removed. Public instance IDs and ports remain checked against known secrets before acceptance; public states and error indicators remain fixed and validated by policy. Successful JSON and log responses now pass through unchanged. API errors carry status codes with empty bodies, including ServeMux errors for unknown paths and methods; the bearer challenge header is retained. This changes generic error-body text intentionally, while preserving status codes. The HTTP layer no longer has a log-derived body cap. The per-instance log ring remains bounded at 64 KiB and retains split-write/overlap redaction.
+
+The reproduction test for oversized `responseCapture` output was adapted after removing that component to verify successful passthrough through the replacement writer. The schema test continues to exercise actual registration, list and inspect routes. A new test checks empty error bodies and the bearer challenge. All 59 prior top-level tests remain present.
+
+### SRF final validation
+
+Targeted `go test -count=1 -run '^(TestFollowup|TestReviewPublicErrorsRedacted|TestKnownSecretRedactionAcrossWrites|TestLongKnownSecretSplitRedaction)' ./cmd/cs2m ./internal/manager` exited 0. Repeated `go test -race -count=20 -timeout=120s -run '^(TestFollowup|TestReviewPublicErrorsRedacted|TestKnownSecretRedactionAcrossWrites|TestLongKnownSecretSplitRedaction)' ./cmd/cs2m ./internal/manager` exited 0. The suite now contains 62 top-level tests (59 prior plus three follow-up tests). Complete validation results follow below.
+
+Final `GOCACHE=/tmp/cs2m-srf-cache GOTMPDIR=/tmp go test -race -count=3 -timeout=180s ./...` exited 0. Final `bash scripts/check.sh` exited 0: gofmt, vet, uncached tests, race, coverage generation, standard build and Git diff check all PASS. There are 62 top-level tests (59 prior plus 3 new). Coverage: cmd 68.8%, manager 82.3%, security 74.4%, overall 79.8%, versus this follow-up's pre-change 78.5% and published 78.6%. Coverage is diagnostic. Native CS2 validation remains PENDING.

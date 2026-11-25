@@ -867,12 +867,4 @@ func (r *ring) Write(p []byte) (int, error) {
 func (r *ring) Flush()         { r.mu.Lock(); defer r.mu.Unlock(); r.drain(true) }
 func (r *ring) String() string { r.mu.Lock(); defer r.mu.Unlock(); return string(r.b) }
 
-// RedactPublic removes known secret values from bounded HTTP response text.
-func (m *Manager) RedactPublic(text string) string {
-	r := newRing(m.policy.secrets...)
-	_, _ = r.Write([]byte(text))
-	r.Flush()
-	return r.String()
-}
-
 var _ io.Writer = (*ring)(nil)

@@ -35,3 +35,11 @@ The historical sections above describe earlier phases and their then-current lim
 The independent review found reproducible redaction, root/metadata revalidation, persisted count, duplicate-JSON and public-ID exposure defects. Narrow fixes and controlled regression tests are recorded in [Phase 1.2.1](phases/phase-01-2-1.md). The manager now preserves the trusted original `argv[0]` with descriptor execution. Historical Phase 1.2 conclusions above remain intact; this section records the later correction. Native CS2 compatibility and validation remain pending.
 
 Final Phase 1.2.1 validation: 59 top-level tests, full race count=3 exit 0, `bash scripts/check.sh` exit 0, overall statement coverage 78.6% versus the local 77.0% pre-change measurement. All SCR criteria passed under the documented local-administrator threat model. Native CS2 validation remains pending. Codex's `.git` mount is read-only; changes are unstaged on `feat/security-hardening` at `a0e8b20`.
+
+
+## Phase 1.2.1 HTTP response follow-up
+
+The final review follow-up removes serialized-response redaction through the log ring. Public JSON field names remain stable; API errors have status-only responses. The existing log limit and known-secret capture redaction remain. See the appended SRF checklist and evidence in [Phase 1.2.1](phases/phase-01-2-1.md). Native CS2 validation remains pending.
+
+
+Final HTTP response follow-up validation: SRF-01 through SRF-05 PASS, 62 top-level tests, full race count=3 exit 0, `bash scripts/check.sh` exit 0, overall coverage 79.8% versus local pre-change 78.5%. Native CS2 validation remains pending.
