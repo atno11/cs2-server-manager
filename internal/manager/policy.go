@@ -2,7 +2,6 @@ package manager
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +19,7 @@ type Policy struct {
 	WorkRoots       []string `json:"work_roots"`
 	BaseArgs        []string `json:"base_args,omitempty"`
 	KnownSecrets    []string `json:"known_secrets,omitempty"`
+	InternalSecrets []string `json:"-"` // Supplied by the local application, never policy JSON.
 }
 type trustedFile struct {
 	path     string
@@ -79,7 +79,7 @@ func ReadPolicy(path string) (Policy, error) {
 	if len(b) > 16*1024 {
 		return p, errors.New("policy file too large")
 	}
-	if err := json.Unmarshal(b, &p); err != nil {
+	if err := DecodeUniqueJSON(b, &p); err != nil {
 		return p, errors.New("invalid policy file")
 	}
 	return p, nil
@@ -112,12 +112,15 @@ func fileIdentity(path string) (trustedFile, error) {
 	if err != nil {
 		return out, err
 	}
-	if !fi.Mode().IsRegular() || fi.Mode().Perm()&0111 == 0 || fi.Mode().Perm()&0022 != 0 {
+	if !trustedExecutableMode(fi.Mode()) {
 		return out, errors.New("executable must be executable regular file")
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok || st.Uid != 0 && st.Uid != uint32(os.Geteuid()) {
 		return out, errors.New("executable must be owned by root or manager user")
+	}
+	if err := rejectFileCapabilities(f); err != nil {
+		return out, err
 	}
 	sum, err := hashFile(f)
 	if err != nil {
@@ -134,8 +137,47 @@ func hashFile(f *os.File) ([32]byte, error) {
 	copy(sum[:], h.Sum(nil))
 	return sum, nil
 }
+func trustedExecutableMode(mode os.FileMode) bool {
+	return mode.IsRegular() && mode.Perm()&0111 != 0 && mode.Perm()&0022 == 0 && mode&(os.ModeSetuid|os.ModeSetgid) == 0
+}
+func rejectFileCapabilities(f *os.File) error {
+	return rejectFileCapabilitiesWith(f, syscall.Getxattr)
+}
+func rejectFileCapabilitiesWith(f *os.File, getxattr func(string, string, []byte) (int, error)) error {
+	var value [64]byte
+	_, err := getxattr(fmt.Sprintf("/proc/self/fd/%d", f.Fd()), "security.capability", value[:])
+	if err == nil {
+		return errors.New("executable file capabilities are not permitted")
+	}
+	if errors.Is(err, syscall.ENODATA) || errors.Is(err, syscall.ENOTSUP) {
+		return nil
+	}
+	return fmt.Errorf("cannot verify executable capabilities: %w", err)
+}
+func checkWorkRoot(root string) error {
+	fi, err := os.Lstat(root)
+	if err != nil {
+		return err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || !fi.IsDir() || st.Uid != uint32(os.Geteuid()) || fi.Mode().Perm()&0022 != 0 {
+		return errors.New("work root is not trusted")
+	}
+	return nil
+}
+func checkExecRoot(root string) error {
+	fi, err := os.Lstat(root)
+	if err != nil {
+		return err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || !fi.IsDir() || fi.Mode().Perm()&0022 != 0 || st.Uid != 0 && st.Uid != uint32(os.Geteuid()) {
+		return errors.New("executable root is not trusted")
+	}
+	return nil
+}
 func compilePolicy(p Policy) (trustPolicy, error) {
-	out := trustPolicy{files: map[string]trustedFile{}, baseArgs: slices.Clone(p.BaseArgs), secrets: slices.Clone(p.KnownSecrets)}
+	out := trustPolicy{files: map[string]trustedFile{}, baseArgs: slices.Clone(p.BaseArgs), secrets: append(slices.Clone(p.KnownSecrets), p.InternalSecrets...)}
 	if len(p.Executables) == 0 || len(p.ExecutableRoots) == 0 || len(p.WorkRoots) == 0 || len(p.Executables) > 16 || len(p.ExecutableRoots) > 16 || len(p.WorkRoots) > 16 {
 		return out, errors.New("policy requires 1-16 executables and roots")
 	}
@@ -144,13 +186,8 @@ func compilePolicy(p Policy) (trustPolicy, error) {
 		if err != nil {
 			return out, fmt.Errorf("invalid work root: %w", err)
 		}
-		fi, err := os.Stat(canon)
-		if err != nil || !fi.IsDir() {
-			return out, errors.New("invalid work root")
-		}
-		st := fi.Sys().(*syscall.Stat_t)
-		if st.Uid != uint32(os.Geteuid()) || fi.Mode().Perm()&0022 != 0 {
-			return out, errors.New("work root must be owned by manager user and not group/world writable")
+		if err := checkWorkRoot(canon); err != nil {
+			return out, err
 		}
 		out.roots = append(out.roots, canon)
 	}
@@ -159,13 +196,8 @@ func compilePolicy(p Policy) (trustPolicy, error) {
 		if err != nil {
 			return out, fmt.Errorf("invalid executable root: %w", err)
 		}
-		fi, err := os.Stat(canon)
-		if err != nil || !fi.IsDir() {
-			return out, errors.New("invalid executable root")
-		}
-		st := fi.Sys().(*syscall.Stat_t)
-		if fi.Mode().Perm()&0022 != 0 || st.Uid != 0 && st.Uid != uint32(os.Geteuid()) {
-			return out, errors.New("executable root is not trusted")
+		if err := checkExecRoot(canon); err != nil {
+			return out, err
 		}
 		out.execRoots = append(out.execRoots, canon)
 	}
@@ -204,9 +236,20 @@ func compilePolicy(p Policy) (trustPolicy, error) {
 	if len(p.KnownSecrets) > 64 {
 		return out, errors.New("too many known secrets")
 	}
-	for _, v := range p.KnownSecrets {
+	if len(p.InternalSecrets) > 1 {
+		return out, errors.New("too many internal secrets")
+	}
+	for _, v := range out.secrets {
 		if len(v) < 4 || len(v) > 256 {
 			return out, errors.New("known secret length must be 4-256")
+		}
+		if strings.Contains("[REDACTED]", v) {
+			return out, errors.New("known secret conflicts with redaction marker")
+		}
+		for _, visible := range []string{"stopped", "running", "failed", "stopping", "operation failed", "previous termination failed"} {
+			if strings.Contains(visible, v) {
+				return out, errors.New("known secret conflicts with public state")
+			}
 		}
 	}
 	return out, nil
@@ -216,6 +259,9 @@ func protectedPortArg(a string) bool {
 	return strings.HasPrefix(v, "-port") || strings.HasPrefix(v, "+hostport")
 }
 func secureExecTree(root, path string) error {
+	if err := checkExecRoot(root); err != nil {
+		return err
+	}
 	current := root
 	rel, _ := filepath.Rel(root, filepath.Dir(path))
 	if rel == "." {
@@ -235,6 +281,9 @@ func secureExecTree(root, path string) error {
 	return nil
 }
 func secureWorkTree(root, path string) error {
+	if err := checkWorkRoot(root); err != nil {
+		return err
+	}
 	current := root
 	rel, _ := filepath.Rel(root, path)
 	parts := []string{}
@@ -295,6 +344,22 @@ func (p trustPolicy) openExecutable(path string) (*os.File, error) {
 	if !ok {
 		return nil, errors.New("executable not trusted")
 	}
+	if _, err := canonical(path); err != nil {
+		return nil, errors.New("trusted executable path changed")
+	}
+	trustedRoot := false
+	for _, root := range p.execRoots {
+		if beneath(root, path) {
+			if err := secureExecTree(root, path); err != nil {
+				return nil, err
+			}
+			trustedRoot = true
+			break
+		}
+	}
+	if !trustedRoot {
+		return nil, errors.New("trusted executable root changed")
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -305,9 +370,13 @@ func (p trustPolicy) openExecutable(path string) (*os.File, error) {
 		return nil, err
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok || uint64(st.Dev) != expected.dev || st.Ino != expected.ino || !fi.Mode().IsRegular() || fi.Mode().Perm()&0111 == 0 {
+	if !ok || uint64(st.Dev) != expected.dev || st.Ino != expected.ino || !trustedExecutableMode(fi.Mode()) || st.Uid != 0 && st.Uid != uint32(os.Geteuid()) {
 		f.Close()
 		return nil, errors.New("trusted executable changed")
+	}
+	if err := rejectFileCapabilities(f); err != nil {
+		f.Close()
+		return nil, err
 	}
 	sum, err := hashFile(f)
 	if err != nil || sum != expected.digest {

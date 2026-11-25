@@ -29,3 +29,9 @@ FLAKY-001 was reproduced and traced to a transient `ESRCH` from `/proc/<pid>/sta
 ## Phase 1.2 current status
 
 The historical sections above describe earlier phases and their then-current limits. Phase 1.2 now requires an owner-only operator `policy.json`, generates a private bearer token, protects all API routes, limits HTTP resources and instance registration, validates exact executable identity and trusted roots, redacts known log secrets, and preflights Linux supervision before launch. See [security model](SECURITY.md) and [Phase 1.2 report](phases/phase-01-2.md). JSON persistence and the existing lifecycle manager remain. Native CS2 validation remains pending. Codex's `.git` mount is read-only; work is unstaged on `feat/security-hardening` at `7f68f77`.
+
+## Phase 1.2.1 security review status
+
+The independent review found reproducible redaction, root/metadata revalidation, persisted count, duplicate-JSON and public-ID exposure defects. Narrow fixes and controlled regression tests are recorded in [Phase 1.2.1](phases/phase-01-2-1.md). The manager now preserves the trusted original `argv[0]` with descriptor execution. Historical Phase 1.2 conclusions above remain intact; this section records the later correction. Native CS2 compatibility and validation remain pending.
+
+Final Phase 1.2.1 validation: 59 top-level tests, full race count=3 exit 0, `bash scripts/check.sh` exit 0, overall statement coverage 78.6% versus the local 77.0% pre-change measurement. All SCR criteria passed under the documented local-administrator threat model. Native CS2 validation remains pending. Codex's `.git` mount is read-only; changes are unstaged on `feat/security-hardening` at `a0e8b20`.

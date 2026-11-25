@@ -90,18 +90,40 @@ func newWithPreflight(dir string, config Policy, preflight func() error) (*Manag
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	b, err := os.ReadFile(m.path)
+	f, err := os.Open(m.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return m, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var defs []Definition
-	if err = json.Unmarshal(b, &defs); err != nil {
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, 512*1024+1))
+	if err != nil {
 		return nil, err
 	}
-	for _, d := range defs {
+	if len(b) > 512*1024 {
+		return nil, errors.New("stored definitions exceed 512 KiB")
+	}
+	var rawDefs []json.RawMessage
+	if err = DecodeUniqueJSON(b, &rawDefs); err != nil {
+		return nil, err
+	}
+	if len(rawDefs) > 32 {
+		return nil, errors.New("stored instance count exceeds 32")
+	}
+	for _, raw := range rawDefs {
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, raw); err != nil {
+			return nil, err
+		}
+		if compact.Len() > 16*1024 {
+			return nil, errors.New("stored definition exceeds 16 KiB")
+		}
+		var d Definition
+		if err = DecodeUniqueJSON(raw, &d); err != nil {
+			return nil, err
+		}
 		if err = m.validate(d, ""); err != nil {
 			return nil, fmt.Errorf("stored %s: %w", d.ID, err)
 		}
@@ -116,11 +138,19 @@ func (m *Manager) validate(d Definition, except string) error {
 	if !idPattern.MatchString(d.ID) {
 		return errors.New("invalid ID")
 	}
+	for _, secret := range m.policy.secrets {
+		if strings.Contains(d.ID, secret) || strings.Contains(fmt.Sprint(d.Port), secret) {
+			return errors.New("public instance value contains a known secret")
+		}
+	}
 	if d.Port < 1 || d.Port > 65535 {
 		return errors.New("invalid port")
 	}
 	if !filepath.IsAbs(d.Executable) || !filepath.IsAbs(d.WorkDir) {
 		return errors.New("paths must be absolute")
+	}
+	if len(d.Executable) > 4096 || len(d.WorkDir) > 4096 {
+		return errors.New("path too long")
 	}
 	if _, err := m.policy.validateDefinition(d); err != nil {
 		return err
@@ -372,6 +402,7 @@ func (m *Manager) startReserved(e *entry) error {
 	args := append(slices.Clone(d.Args), m.policy.baseArgs...)
 	args = append(args, "-port", fmt.Sprint(d.Port))
 	cmd := exec.Command("/proc/self/fd/3", args...)
+	cmd.Args[0] = d.Executable
 	cmd.ExtraFiles = []*os.File{execFile}
 	cmd.Dir = d.WorkDir
 	pidfd := -1
@@ -749,11 +780,13 @@ func (m *Manager) Close() error {
 const logLimit = 64 * 1024
 
 type ring struct {
-	mu      sync.Mutex
-	b       []byte
-	pending []byte
-	secrets [][]byte
-	longest int
+	mu        sync.Mutex
+	b         []byte
+	pending   []byte
+	secrets   [][]byte
+	longest   int
+	covered   int
+	redacting bool
 }
 
 func newRing(secrets ...string) *ring {
@@ -793,25 +826,28 @@ func (r *ring) drain(all bool) {
 	if limit < 0 {
 		limit = 0
 	}
-	i := 0
 	out := make([]byte, 0, limit)
-	for i < limit {
-		matched := false
+	for i := 0; i < limit; i++ {
 		for _, secret := range r.secrets {
 			if len(r.pending)-i >= len(secret) && bytes.Equal(r.pending[i:i+len(secret)], secret) {
-				out = append(out, []byte("[REDACTED]")...)
-				i += len(secret)
-				matched = true
-				break
+				if len(secret) > r.covered {
+					r.covered = len(secret)
+				}
 			}
 		}
-		if !matched {
+		if r.covered > 0 {
+			if !r.redacting {
+				out = append(out, []byte("[REDACTED]")...)
+				r.redacting = true
+			}
+			r.covered--
+		} else {
+			r.redacting = false
 			out = append(out, r.pending[i])
-			i++
 		}
 	}
 	r.appendBounded(out)
-	r.pending = append(r.pending[:0], r.pending[i:]...)
+	r.pending = append(r.pending[:0], r.pending[limit:]...)
 }
 func (r *ring) Write(p []byte) (int, error) {
 	r.mu.Lock()
@@ -830,5 +866,13 @@ func (r *ring) Write(p []byte) (int, error) {
 }
 func (r *ring) Flush()         { r.mu.Lock(); defer r.mu.Unlock(); r.drain(true) }
 func (r *ring) String() string { r.mu.Lock(); defer r.mu.Unlock(); return string(r.b) }
+
+// RedactPublic removes known secret values from bounded HTTP response text.
+func (m *Manager) RedactPublic(text string) string {
+	r := newRing(m.policy.secrets...)
+	_, _ = r.Write([]byte(text))
+	r.Flush()
+	return r.String()
+}
 
 var _ io.Writer = (*ring)(nil)

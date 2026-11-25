@@ -16,7 +16,7 @@ Create a private runtime directory and a mode 0600 `policy.json` before starting
 }
 ```
 
-The exact executable path is pinned by device, inode and SHA-256 digest for the manager lifetime. Changing it requires an operator policy review and manager restart. The manager revalidates the pinned file before every start and launches through its open descriptor. Existing unsafe files or directories cause an explicit failure; permissions are not silently changed.
+The exact executable path is pinned by device, inode and SHA-256 digest for the manager lifetime. At each start, the trusted roots, executable ownership, mode and file capabilities are rechecked. Changing it requires an operator policy review and manager restart. The manager revalidates the pinned file before every start and launches through its open descriptor. Existing unsafe files or directories cause an explicit failure; permissions are not silently changed.
 
 On first start, the manager generates a random 0600 `admin.token` in the runtime directory. Read this file locally as the administrator, enter its value in the web UI, or send it in an `Authorization: Bearer` header from a programmatic client. Keep it out of URLs, shell history and logs. The UI holds the token only in page memory; closing or refreshing the page clears it. All `/api/` routes require it. The token is not printed by the application. See [security policy](docs/SECURITY.md) for the threat model and limitations.
 
@@ -28,7 +28,7 @@ On first start, the manager generates a random 0600 `admin.token` in the runtime
 - `POST /api/instances/{id}/start`, `/stop`, and `/restart` control it.
 - `GET /api/instances/{id}/logs` returns the last 64 KiB of redacted output.
 
-The HTTP `args` field accepts only limited positional values. Operator-controlled CS2 flags belong in `base_args`; the manager appends `-port <port>`. Each instance uses its own existing working directory. Definitions persist in a private `instances.json` file. Running processes are stopped on orderly manager shutdown and are not resumed automatically. Remote agents, downloads, SQLite and SSE are deferred.
+The HTTP `args` field accepts only limited positional values. Operator-controlled CS2 flags belong in `base_args`; the manager appends `-port <port>`. Each instance uses its own existing working directory. Definitions persist in a private `instances.json` file; startup rejects duplicate JSON keys, more than 32 definitions, files over 512 KiB and individual compact definitions over 16 KiB. Running processes are stopped on orderly manager shutdown and are not resumed automatically. Remote agents, downloads, SQLite and SSE are deferred.
 
 ## Development
 

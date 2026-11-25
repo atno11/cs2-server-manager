@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -43,7 +44,7 @@ func main() {
 	if err != nil {
 		log.Fatal("credential bootstrap failed: ", err)
 	}
-	policy.KnownSecrets = append(policy.KnownSecrets, token)
+	policy.InternalSecrets = []string{token}
 	m, err := manager.New(dir, policy)
 	if err != nil {
 		log.Fatal(err)
@@ -135,15 +136,13 @@ func handler(m *manager.Manager, token, authority string) http.Handler {
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		var d manager.Definition
-		if err := dec.Decode(&d); err != nil {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
 			jsonError(w, err)
 			return
 		}
-		var trailing any
-		if err := dec.Decode(&trailing); err != io.EOF {
+		var d manager.Definition
+		if err := manager.DecodeUniqueJSON(body, &d); err != nil {
 			jsonError(w, err)
 			return
 		}
@@ -194,6 +193,11 @@ func handler(m *manager.Manager, token, authority string) http.Handler {
 	})
 	sem := make(chan struct{}, 64)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			capture := &responseCapture{header: make(http.Header)}
+			defer capture.finish(w, m)
+			w = capture
+		}
 		if r.Host != authority {
 			http.Error(w, "invalid host", 421)
 			return
@@ -225,6 +229,39 @@ func handler(m *manager.Manager, token, authority string) http.Handler {
 		}
 		mux.ServeHTTP(w, r)
 	})
+}
+
+type responseCapture struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (c *responseCapture) Header() http.Header { return c.header }
+func (c *responseCapture) WriteHeader(status int) {
+	if c.status == 0 {
+		c.status = status
+	}
+}
+func (c *responseCapture) Write(p []byte) (int, error) {
+	if c.status == 0 {
+		c.status = http.StatusOK
+	}
+	return c.body.Write(p)
+}
+func (c *responseCapture) finish(w http.ResponseWriter, m *manager.Manager) {
+	for key, values := range c.header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.Header().Del("Content-Length")
+	status := c.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, m.RedactPublic(c.body.String()))
 }
 func jsonError(w http.ResponseWriter, err error) {
 	var max *http.MaxBytesError

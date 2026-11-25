@@ -27,3 +27,7 @@ FLAKY-001 was reproduced, fixed narrowly and validated with 100 normal and 50 ra
 ## Phase 1.2
 
 Security hardening is implemented for a single local administrator: bearer authentication, origin/authority checks, strict HTTP input, trusted execution policy, private persistence and known-secret log redaction. See `phases/phase-01-2.md`. Next, review and commit this phase on the host, then plan a separately scoped increment. SQLite, SSE and native CS2 validation remain pending; no remote-host feature is included.
+
+## Phase 1.2.1
+
+Independent security review fixes are implemented and covered by controlled tests. See `phases/phase-01-2-1.md`. Host-side review and commit are next; native CS2 compatibility must be validated separately before claiming integration readiness. SQLite, SSE and remote-host management remain deferred.

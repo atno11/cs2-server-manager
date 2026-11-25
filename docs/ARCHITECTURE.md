@@ -21,3 +21,7 @@ The independent review identified an unsafe post-reap process-group signal in Ph
 ## Phase 1.2 security boundary
 
 The local operator supplies `policy.json`, defining exact executable identities and working roots. `internal/manager` pins trusted executable device/inode/hash, revalidates before launch, and executes through an open descriptor. HTTP registration cannot modify this policy. `internal/security` creates and checks a private random admin bearer token. `cmd/cs2m` enforces exact loopback Host and Origin, authentication, strict routes and JSON, connection/request limits, and a public response model. Known secrets are redacted from bounded logs. Linux supervision capabilities are probed before managed launches. See [SECURITY.md](SECURITY.md) and [Phase 1.2](phases/phase-01-2.md) for limits and evidence.
+
+## Phase 1.2.1 review correction
+
+The trust-policy boundaries are rechecked at each launch, including root metadata and executable privilege attributes. All JSON input paths use duplicate-key detection. Persisted definitions are bounded before loading. The redactor tracks overlapping secret intervals and is also applied to app-generated API responses. Descriptor execution retains the authorized path in `argv[0]`; native CS2 compatibility is still unverified. See `phases/phase-01-2-1.md`.
