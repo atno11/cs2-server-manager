@@ -378,13 +378,16 @@ func groupHasLiveMembers(pgid, leader int) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	return scanGroupMembers(dirs, os.ReadFile, pgid, leader)
+}
+func scanGroupMembers(dirs []os.DirEntry, readStat func(string) ([]byte, error), pgid, leader int) (bool, error) {
 	for _, d := range dirs {
 		pid, err := strconv.Atoi(d.Name())
 		if err != nil || pid == leader {
 			continue
 		}
-		b, err := os.ReadFile("/proc/" + d.Name() + "/stat")
-		if errors.Is(err, os.ErrNotExist) {
+		b, err := readStat("/proc/" + d.Name() + "/stat")
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 			continue
 		}
 		if err != nil {

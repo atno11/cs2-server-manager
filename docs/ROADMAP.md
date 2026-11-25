@@ -19,3 +19,7 @@ Lifecycle hardening completed with fake-process regression coverage. See `phases
 ## Phase 1.1.1
 
 Independent lifecycle review fixes are implemented and simulated checks pass. See `phases/phase-01-1-1.md`. Merge readiness still requires normal host-side review and native CS2 validation remains pending; Phase 1.2 is not started.
+
+## Phase 1.1.2
+
+FLAKY-001 was reproduced, fixed narrowly and validated with 100 normal and 50 race-detector repetitions of the affected test. See `phases/phase-01-1-2.md`. The next action is host-side commit and review of the stability fix before any merge decision; Phase 1.2 remains deferred.

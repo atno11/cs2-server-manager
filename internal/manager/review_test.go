@@ -111,3 +111,28 @@ func TestClosedPidfdCannotSignalGroup(t *testing.T) {
 		t.Fatal("invalid pidfd accepted")
 	}
 }
+
+func TestDisappearingProcEntryIsIgnored(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"1", "2"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, err := scanGroupMembers(entries, func(path string) ([]byte, error) {
+		if strings.Contains(path, "/1/stat") {
+			return nil, &os.PathError{Op: "read", Path: path, Err: syscall.ESRCH}
+		}
+		return []byte("2 (owned-child) S 1 42 0 0 0 0"), nil
+	}, 42, 99)
+	if err != nil {
+		t.Fatalf("transient disappearance rejected: %v", err)
+	}
+	if !found {
+		t.Fatal("live owned member not found after disappearance")
+	}
+}

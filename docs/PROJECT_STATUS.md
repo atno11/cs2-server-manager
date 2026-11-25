@@ -21,3 +21,7 @@ This phase does not change JSON persistence, authentication, or secret handling.
 ## Phase 1.1.1 review status
 
 The independent lifecycle review is resolved in code and simulated validation. See `phases/phase-01-1-1.md` for the fixed LCR checklist, one reproduced stale-completion defect, corrected process-group ownership, eight new tests, and the disclosed intermittent race-test failure that did not recur in later runs. Final `bash scripts/check.sh` exited 0; overall coverage is 76.5% against the published Phase 1.1 78.5% baseline. Linux 6.9+ pidfd process-group signaling and readable `/proc` are required for confirmed cleanup. Native CS2 validation remains pending. Branch `feat/process-lifecycle-hardening` is based on `b7b7089`; current changes are unstaged because Codex sees `.git` read-only.
+
+## Phase 1.1.2 stability validation
+
+FLAKY-001 was reproduced and traced to a transient `ESRCH` from `/proc/<pid>/stat` during group-member scanning. A deterministic test failed before the narrow fix and passed after it. Post-fix affected-test runs passed 100/100 normally and 50/50 with the race detector; full race and `scripts/check.sh` validation passed. See `phases/phase-01-1-2.md` for the original failure counts, exact commands, resource evidence and remaining limits. Final coverage is 76.6% overall versus 76.5% at phase start. Native CS2 validation remains pending. Branch `feat/process-lifecycle-hardening` is based on `8d32143`; Codex's `.git` mount is read-only and this phase's changes are unstaged.
