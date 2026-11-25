@@ -15,3 +15,7 @@ With host-side Git initialized, review and preserve the existing MVP. Define a f
 ## Phase 1.1
 
 Lifecycle hardening completed with fake-process regression coverage. See `phases/phase-01-1.md`. The next phase should address the remaining approved scope in separately bounded increments; do not treat simulated process tests as native CS2 validation.
+
+## Phase 1.1.1
+
+Independent lifecycle review fixes are implemented and simulated checks pass. See `phases/phase-01-1-1.md`. Merge readiness still requires normal host-side review and native CS2 validation remains pending; Phase 1.2 is not started.

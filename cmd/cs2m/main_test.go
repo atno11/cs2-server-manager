@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -121,6 +122,7 @@ type pipeListener struct {
 	connections chan net.Conn
 	closed      chan struct{}
 	once        sync.Once
+	closeErr    error
 }
 
 func (l *pipeListener) Accept() (net.Conn, error) {
@@ -131,10 +133,87 @@ func (l *pipeListener) Accept() (net.Conn, error) {
 		return nil, net.ErrClosed
 	}
 }
-func (l *pipeListener) Close() error   { l.once.Do(func() { close(l.closed) }); return nil }
+func (l *pipeListener) Close() error   { l.once.Do(func() { close(l.closed) }); return l.closeErr }
 func (l *pipeListener) Addr() net.Addr { return pipeAddr("pipe") }
 
 type pipeAddr string
 
 func (a pipeAddr) Network() string { return string(a) }
 func (a pipeAddr) String() string  { return string(a) }
+
+func TestHTTPShutdownErrorPropagates(t *testing.T) {
+	m, err := manager.New(filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := &pipeListener{connections: make(chan net.Conn), closed: make(chan struct{}), closeErr: errors.New("listener close failure")}
+	ctx, cancel := context.WithCancel(context.Background())
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })}
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, srv, listener, m) }()
+	client, server := net.Pipe()
+	select {
+	case listener.connections <- server:
+	case <-time.After(time.Second):
+		t.Fatal("listener unavailable")
+	}
+	_, _ = io.WriteString(client, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	_ = client.Close()
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "listener close failure") {
+			t.Fatalf("shutdown error=%v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdown timed out")
+	}
+	if err := m.Start("none"); err == nil {
+		t.Fatal("manager remained open")
+	}
+}
+func TestHTTPShutdownDeadlinePropagates(t *testing.T) {
+	m, err := manager.New(filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := &pipeListener{connections: make(chan net.Conn), closed: make(chan struct{})}
+	entered := make(chan struct{})
+	released := make(chan struct{})
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(entered); <-r.Context().Done(); close(released) })}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serveWithTimeout(ctx, srv, listener, m, 30*time.Millisecond) }()
+	client, server := net.Pipe()
+	select {
+	case listener.connections <- server:
+	case <-time.After(time.Second):
+		t.Fatal("listener unavailable")
+	}
+	_, _ = io.WriteString(client, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("shutdown deadline error=%v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown blocked")
+	}
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("active connection not closed")
+	}
+	_ = client.Close()
+}

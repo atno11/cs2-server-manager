@@ -10,9 +10,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 type Definition struct {
@@ -24,22 +27,28 @@ type Definition struct {
 }
 type Instance struct {
 	Definition
-	State string `json:"state"`
-	Error string `json:"error,omitempty"`
+	State           string `json:"state"`
+	Error           string `json:"error,omitempty"`
+	LastTermination string `json:"last_termination,omitempty"`
 }
 type process struct {
 	cmd       *exec.Cmd
 	done      chan struct{}
 	pgid      int
+	pidfd     int
+	exited    bool
+	termAt    time.Time
+	killSent  bool
 	stopping  bool
 	forced    bool
 	signalErr error
 }
 type entry struct {
-	def            Definition
-	state, err, op string
-	proc           *process
-	log            *ring
+	def             Definition
+	state, err, op  string
+	lastTermination string
+	proc            *process
+	log             *ring
 }
 type Manager struct {
 	mu        sync.Mutex
@@ -48,6 +57,7 @@ type Manager struct {
 	closed    bool
 	closeDone chan struct{}
 	opWG      sync.WaitGroup
+	closeErr  error
 }
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -196,7 +206,7 @@ func (m *Manager) Remove(id string) error {
 	return nil
 }
 func view(e *entry) Instance {
-	return Instance{Definition: copyDefinition(e.def), State: e.state, Error: e.err}
+	return Instance{Definition: copyDefinition(e.def), State: e.state, Error: e.err, LastTermination: e.lastTermination}
 }
 func (m *Manager) List() []Instance {
 	m.mu.Lock()
@@ -293,7 +303,8 @@ func (m *Manager) startReserved(e *entry) error {
 	args := append(d.Args, "-port", fmt.Sprint(d.Port))
 	cmd := exec.Command(d.Executable, args...)
 	cmd.Dir = d.WorkDir
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	pidfd := -1
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, PidFD: &pidfd}
 	cmd.WaitDelay = time.Second
 	cmd.Stdout, cmd.Stderr = e.log, e.log
 	if err := cmd.Start(); err != nil {
@@ -303,7 +314,18 @@ func (m *Manager) startReserved(e *entry) error {
 		m.mu.Unlock()
 		return err
 	}
-	p := &process{cmd: cmd, done: make(chan struct{}), pgid: cmd.Process.Pid}
+	if pidfd < 0 {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return errors.New("Linux pidfd unavailable")
+	}
+	if err := pidfdSignalGroup(pidfd, 0); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		_ = syscall.Close(pidfd)
+		return fmt.Errorf("pidfd process-group signaling unavailable: %w", err)
+	}
+	p := &process{cmd: cmd, done: make(chan struct{}), pgid: cmd.Process.Pid, pidfd: pidfd}
 	m.mu.Lock()
 	e.proc = p
 	e.state = "running"
@@ -312,25 +334,104 @@ func (m *Manager) startReserved(e *entry) error {
 	m.mu.Unlock()
 	go m.wait(e, p)
 	if shuttingDown {
-		_ = m.terminate(e, p)
-		return errors.New("manager closed")
+		result := m.terminate(e, p)
+		return errors.Join(errors.New("manager closed"), result.err)
 	}
 	return nil
 }
+
+// waitLeader observes exit without reaping. The zombie leader anchors its group ID
+// until all owned group signaling is finished and cmd.Wait reaps it.
+func waitLeader(pid int) error {
+	var info [128]byte
+	for {
+		_, _, errno := syscall.Syscall6(syscall.SYS_WAITID, 1, uintptr(pid), uintptr(unsafe.Pointer(&info[0])), uintptr(syscall.WEXITED|syscall.WNOWAIT), 0, 0)
+		if errno == syscall.EINTR {
+			continue
+		}
+		if errno != 0 {
+			return errno
+		}
+		return nil
+	}
+}
+
+const pidfdSignalProcessGroup = 4
+const sysPidfdSendSignal = 424 // Linux syscall number on supported Linux architectures.
+func pidfdSignalGroup(fd int, sig syscall.Signal) error {
+	if fd < 0 {
+		return errors.New("invalid pidfd")
+	}
+	_, _, errno := syscall.Syscall6(sysPidfdSendSignal, uintptr(fd), uintptr(sig), 0, pidfdSignalProcessGroup, 0, 0)
+	if errno == syscall.ESRCH {
+		return nil
+	}
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+// groupHasLiveMembers excludes the unreaped leader and zombie descendants.
+func groupHasLiveMembers(pgid, leader int) (bool, error) {
+	dirs, err := os.ReadDir("/proc")
+	if err != nil {
+		return false, err
+	}
+	for _, d := range dirs {
+		pid, err := strconv.Atoi(d.Name())
+		if err != nil || pid == leader {
+			continue
+		}
+		b, err := os.ReadFile("/proc/" + d.Name() + "/stat")
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		rest := string(b)
+		i := strings.LastIndex(rest, ") ")
+		if i < 0 {
+			continue
+		}
+		fields := strings.Fields(rest[i+2:])
+		if len(fields) < 3 {
+			continue
+		}
+		group, err := strconv.Atoi(fields[2])
+		if err == nil && group == pgid && fields[0] != "Z" && fields[0] != "X" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 func (m *Manager) wait(e *entry, p *process) {
+	observedErr := waitLeader(p.cmd.Process.Pid)
+	m.mu.Lock()
+	p.exited = true
+	m.mu.Unlock()
+	cleanupErr := observedErr
+	if observedErr == nil {
+		cleanupErr = m.cleanupGroup(e, p)
+	}
 	err := p.cmd.Wait()
-	// The owned group may still contain children holding resources after its leader exits.
-	cleanupErr := signalGroup(p.pgid, syscall.SIGKILL)
+	_ = syscall.Close(p.pidfd)
 	m.mu.Lock()
 	if e.proc == p {
-		e.proc = nil
+		if cleanupErr == nil {
+			e.proc = nil
+		}
 		switch {
-		case p.forced:
+		case cleanupErr != nil:
 			e.state = "failed"
-			e.err = "forced termination after graceful timeout"
+			e.err = "process-group cleanup: " + cleanupErr.Error()
 		case p.signalErr != nil:
 			e.state = "failed"
 			e.err = p.signalErr.Error()
+		case p.forced:
+			e.state = "failed"
+			e.err = "forced termination after graceful timeout"
 		case p.stopping:
 			e.state = "stopped"
 			e.err = ""
@@ -341,66 +442,154 @@ func (m *Manager) wait(e *entry, p *process) {
 			e.state = "failed"
 			e.err = err.Error()
 		}
+		if p.forced {
+			e.lastTermination = "forced termination after graceful timeout"
+		}
 		if cleanupErr != nil {
-			e.state = "failed"
-			e.err = "process-group cleanup: " + cleanupErr.Error()
+			e.lastTermination = "process-group cleanup: " + cleanupErr.Error()
 		}
 	}
 	close(p.done)
 	m.mu.Unlock()
 }
-func signalGroup(pgid int, sig syscall.Signal) error {
-	if pgid <= 0 {
-		return errors.New("invalid process group")
+func (m *Manager) cleanupGroup(e *entry, p *process) error {
+	live, err := groupHasLiveMembers(p.pgid, p.cmd.Process.Pid)
+	if err != nil {
+		return err
 	}
-	err := syscall.Kill(-pgid, sig)
-	if errors.Is(err, syscall.ESRCH) {
+	if !live {
 		return nil
 	}
-	return err
-}
-func (m *Manager) terminate(e *entry, p *process) error {
 	m.mu.Lock()
-	p.stopping = true
-	e.state = "stopping"
-	m.mu.Unlock()
-	if err := signalGroup(p.pgid, syscall.SIGTERM); err != nil {
-		m.mu.Lock()
-		p.signalErr = err
-		m.mu.Unlock()
+	if p.termAt.IsZero() {
+		p.termAt = time.Now()
+		err = pidfdSignalGroup(p.pidfd, syscall.SIGTERM)
+		if err != nil {
+			p.signalErr = err
+		}
 	}
-	timer := time.NewTimer(gracefulTimeout)
+	deadline := p.termAt.Add(gracefulTimeout)
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	for time.Now().Before(deadline) {
+		live, err = groupHasLiveMembers(p.pgid, p.cmd.Process.Pid)
+		if err != nil {
+			return err
+		}
+		if !live {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	m.mu.Lock()
+	if !p.killSent {
+		p.killSent = true
+		p.forced = true
+		err = pidfdSignalGroup(p.pidfd, syscall.SIGKILL)
+		if err != nil {
+			p.signalErr = err
+		}
+	}
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	deadline = time.Now().Add(forcedTimeout)
+	for time.Now().Before(deadline) {
+		live, err = groupHasLiveMembers(p.pgid, p.cmd.Process.Pid)
+		if err != nil {
+			return err
+		}
+		if !live {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return errors.New("owned process group remained active after SIGKILL")
+}
+
+type terminationResult struct {
+	confirmed, forced, replaceable bool
+	err                            error
+}
+
+func (m *Manager) terminate(e *entry, p *process) terminationResult {
+	m.mu.Lock()
+	if e.proc != p {
+		if e.proc == nil {
+			result := terminationResult{confirmed: true}
+			if e.state == "failed" {
+				result.err = errors.New(e.err)
+			}
+			m.mu.Unlock()
+			return result
+		}
+		m.mu.Unlock()
+		return terminationResult{err: errors.New("stale process ownership")}
+	}
+	if !p.exited {
+		p.stopping = true
+		e.state = "stopping"
+		if p.termAt.IsZero() {
+			p.termAt = time.Now()
+			if err := pidfdSignalGroup(p.pidfd, syscall.SIGTERM); err != nil {
+				p.signalErr = err
+			}
+		}
+	}
+	termAt := p.termAt
+	m.mu.Unlock()
+	if termAt.IsZero() { // Natural exit already observed; waiter owns descendant cleanup.
+		select {
+		case <-p.done:
+			return m.terminationResult(e, p)
+		case <-time.After(gracefulTimeout + forcedTimeout + time.Second):
+			return terminationResult{err: errors.New("process completion timed out")}
+		}
+	}
+	timer := time.NewTimer(time.Until(termAt.Add(gracefulTimeout)))
 	defer timer.Stop()
 	select {
 	case <-p.done:
+		return m.terminationResult(e, p)
 	case <-timer.C:
-		m.mu.Lock()
-		p.forced = true
-		m.mu.Unlock()
-		if err := signalGroup(p.pgid, syscall.SIGKILL); err != nil {
-			m.mu.Lock()
-			p.signalErr = err
-			m.mu.Unlock()
-		}
-		killTimer := time.NewTimer(forcedTimeout)
-		defer killTimer.Stop()
-		select {
-		case <-p.done:
-		case <-killTimer.C:
-			m.mu.Lock()
-			e.state = "failed"
-			e.err = "process did not exit after forced termination"
-			m.mu.Unlock()
-			return errors.New("process termination timed out")
-		}
 	}
 	m.mu.Lock()
-	state, detail := e.state, e.err
-	m.mu.Unlock()
-	if state == "failed" {
-		return errors.New(detail)
+	if e.proc == p && !p.exited && !p.killSent {
+		p.killSent = true
+		p.forced = true
+		if err := pidfdSignalGroup(p.pidfd, syscall.SIGKILL); err != nil {
+			p.signalErr = err
+		}
 	}
-	return nil
+	m.mu.Unlock()
+	killTimer := time.NewTimer(forcedTimeout + time.Second)
+	defer killTimer.Stop()
+	select {
+	case <-p.done:
+		return m.terminationResult(e, p)
+	case <-killTimer.C:
+		m.mu.Lock()
+		if e.proc == p {
+			e.state = "failed"
+			e.err = "process did not exit after forced termination"
+		}
+		m.mu.Unlock()
+		return terminationResult{err: errors.New("process termination timed out")}
+	}
+}
+func (m *Manager) terminationResult(e *entry, p *process) terminationResult {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e.proc == p {
+		return terminationResult{err: errors.New("process completion unconfirmed")}
+	}
+	if e.state == "failed" {
+		return terminationResult{confirmed: true, forced: p.forced, replaceable: p.forced && p.signalErr == nil && e.err == "forced termination after graceful timeout", err: errors.New(e.err)}
+	}
+	return terminationResult{confirmed: true, forced: p.forced}
 }
 func (m *Manager) Stop(id string) error {
 	e, err := m.reserve(id, "stop")
@@ -414,7 +603,7 @@ func (m *Manager) Stop(id string) error {
 	if p == nil {
 		return errors.New("instance is not running")
 	}
-	return m.terminate(e, p)
+	return m.terminate(e, p).err
 }
 func (m *Manager) Restart(id string) error {
 	e, err := m.reserve(id, "restart")
@@ -426,19 +615,23 @@ func (m *Manager) Restart(id string) error {
 	p := e.proc
 	m.mu.Unlock()
 	if p != nil {
-		if err := m.terminate(e, p); err != nil {
-			return err
+		result := m.terminate(e, p)
+		if !result.confirmed || (result.err != nil && !result.replaceable) {
+			return result.err
 		}
 	}
 	return m.startReserved(e)
 }
-func (m *Manager) Close() {
+func (m *Manager) Close() error {
 	m.mu.Lock()
 	if m.closed {
 		done := m.closeDone
 		m.mu.Unlock()
 		<-done
-		return
+		m.mu.Lock()
+		err := m.closeErr
+		m.mu.Unlock()
+		return err
 	}
 	m.closed = true
 	m.mu.Unlock()
@@ -457,13 +650,25 @@ func (m *Manager) Close() {
 		}
 	}
 	m.mu.Unlock()
+	errs := make([]error, len(active))
 	var wg sync.WaitGroup
-	for _, item := range active {
+	for i, item := range active {
 		wg.Add(1)
-		go func(e *entry, p *process) { defer wg.Done(); _ = m.terminate(e, p) }(item.e, item.p)
+		go func(i int, e *entry, p *process) {
+			defer wg.Done()
+			result := m.terminate(e, p)
+			if result.err != nil {
+				errs[i] = fmt.Errorf("%s: %w", e.def.ID, result.err)
+			}
+		}(i, item.e, item.p)
 	}
 	wg.Wait()
+	m.mu.Lock()
+	m.closeErr = errors.Join(errs...)
 	close(m.closeDone)
+	err := m.closeErr
+	m.mu.Unlock()
+	return err
 }
 
 const logLimit = 64 * 1024

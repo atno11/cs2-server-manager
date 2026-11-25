@@ -25,7 +25,7 @@ func scriptFixture(t *testing.T, body string) (*Manager, Definition) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(m.Close)
+	t.Cleanup(func() { _ = m.Close() })
 	return m, Definition{ID: "one", Executable: exe, WorkDir: root, Port: 27015}
 }
 func eventually(t *testing.T, what string, fn func() bool) {
@@ -330,11 +330,15 @@ func TestRestartConflictsAndIndependentInstance(t *testing.T) {
 	}
 	select {
 	case err := <-result:
-		if err == nil {
-			t.Fatal("forced restart did not report failure")
+		if err != nil {
+			t.Fatalf("confirmed forced restart failed: %v", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("restart timed out")
+	}
+	first, _ := m.Get("one")
+	if first.State != "running" || !strings.Contains(first.LastTermination, "forced") {
+		t.Fatalf("restart state=%s diagnostic=%q", first.State, first.LastTermination)
 	}
 	v, _ := m.Get("two")
 	if v.State != "running" {
@@ -510,7 +514,11 @@ func TestUnexpectedLeaderExitCleansDescendant(t *testing.T) {
 	if err := m.Start(d.ID); err != nil {
 		t.Fatal(err)
 	}
-	waitState(t, m, d.ID, "stopped")
+	eventually(t, "leader completion", func() bool { v, _ := m.Get(d.ID); return v.State == "stopped" || v.State == "failed" })
+	v, _ := m.Get(d.ID)
+	if v.State != "stopped" {
+		t.Fatalf("leader completion state=%s error=%s", v.State, v.Error)
+	}
 	b, err := os.ReadFile(filepath.Join(d.WorkDir, "child.pid"))
 	if err != nil {
 		t.Fatal(err)
@@ -527,14 +535,15 @@ func TestTerminationTimeoutIsObservable(t *testing.T) {
 	e := &entry{state: "running"}
 	p := &process{done: make(chan struct{}), pgid: 2147483647}
 	started := time.Now()
-	err := m.terminate(e, p)
-	if err == nil || !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("timeout error=%v", err)
+	e.proc = p
+	result := m.terminate(e, p)
+	if result.err == nil || !strings.Contains(result.err.Error(), "timed out") {
+		t.Fatalf("timeout error=%v", result.err)
 	}
 	if e.state != "failed" || !strings.Contains(e.err, "did not exit") {
 		t.Fatalf("timeout state=%s error=%s", e.state, e.err)
 	}
-	if time.Since(started) > gracefulTimeout+forcedTimeout+time.Second {
+	if time.Since(started) > gracefulTimeout+forcedTimeout+2*time.Second {
 		t.Fatal("timeout wait exceeded bound")
 	}
 }

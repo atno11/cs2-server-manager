@@ -13,3 +13,7 @@ SQLite and SSE are approved architecture but are not implemented. There is no re
 ## Phase 1.1 lifecycle supervision
 
 The registry mutex protects definitions, state, and one operation reservation per instance; process waits occur outside it. Linux process groups scope TERM and KILL to a managed instance. A completion handler validates the process pointer before changing state. `Close` blocks new mutations, waits for reserved operations, stops active groups concurrently, and shares one completion channel with all callers. See `phases/phase-01-1.md` for state transitions, time bounds, tests, and process-group limits.
+
+## Phase 1.1.1 review correction
+
+The independent review identified an unsafe post-reap process-group signal in Phase 1.1. Supervision now keeps the leader waitable with `waitid(WNOWAIT)` until group cleanup completes, and uses a pidfd process-group signal rather than a negative PGID. Close returns a shared result; HTTP shutdown errors are propagated. See `phases/phase-01-1-1.md` for ownership requirements and limits. The prior Phase 1.1 description is historical.

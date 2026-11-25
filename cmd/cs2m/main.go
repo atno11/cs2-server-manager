@@ -48,8 +48,7 @@ func main() {
 	defer stop()
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		m.Close()
-		log.Fatal(err)
+		log.Fatal(errors.Join(err, m.Close()))
 	}
 	log.Printf("listening on %s", listener.Addr())
 	if err := serve(ctx, srv, listener, m); err != nil {
@@ -58,23 +57,29 @@ func main() {
 
 }
 func serve(ctx context.Context, srv *http.Server, listener net.Listener, m *manager.Manager) error {
+	return serveWithTimeout(ctx, srv, listener, m, 15*time.Second)
+}
+func serveWithTimeout(ctx context.Context, srv *http.Server, listener net.Listener, m *manager.Manager, timeout time.Duration) error {
 	ctx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
+	shutdownResult := make(chan error, 1)
 	go func() {
-		defer close(done)
 		<-ctx.Done()
-		shutdownCtx, finish := context.WithTimeout(context.Background(), 15*time.Second)
+		shutdownCtx, finish := context.WithTimeout(context.Background(), timeout)
 		defer finish()
-		_ = srv.Shutdown(shutdownCtx)
+		err := srv.Shutdown(shutdownCtx)
+		if err != nil {
+			err = errors.Join(err, srv.Close())
+		}
+		shutdownResult <- err
 	}()
-	err := srv.Serve(listener)
+	serveErr := srv.Serve(listener)
 	cancel()
-	<-done
-	m.Close()
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+	shutdownErr := <-shutdownResult
+	closeErr := m.Close()
+	if errors.Is(serveErr, http.ErrServerClosed) {
+		serveErr = nil
 	}
-	return err
+	return errors.Join(serveErr, shutdownErr, closeErr)
 }
 
 func handler(m *manager.Manager) http.Handler {
