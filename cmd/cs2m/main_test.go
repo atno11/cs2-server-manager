@@ -1,12 +1,18 @@
 package main
 
 import (
+	"bufio"
+	"context"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/atno11/cs2-server-manager/internal/manager"
 )
@@ -45,3 +51,90 @@ func TestAPI(t *testing.T) {
 		t.Fatalf("delete: %d", w.Code)
 	}
 }
+
+func TestHTTPShutdownCoordinatesManager(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "fake.sh")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\necho ready\nwhile :; do sleep 1; done\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	m, err := manager.New(filepath.Join(dir, "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.Register(manager.Definition{ID: "one", Executable: exe, WorkDir: dir, Port: 27015}); err != nil {
+		t.Fatal(err)
+	}
+	listener := &pipeListener{connections: make(chan net.Conn), closed: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	srv := &http.Server{Handler: handler(m)}
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, srv, listener, m) }()
+	request := func(method, path string) *http.Response {
+		t.Helper()
+		client, server := net.Pipe()
+		select {
+		case listener.connections <- server:
+		case <-time.After(time.Second):
+			t.Fatal("listener unavailable")
+		}
+		if _, err := io.WriteString(client, method+" "+path+" HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = client.Close() })
+		return resp
+	}
+	resp := request("POST", "/api/instances/one/start")
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("start status %d", resp.StatusCode)
+	}
+	resp = request("POST", "/api/instances/one/restart")
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("restart status %d", resp.StatusCode)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("server shutdown timed out")
+	}
+	v, err := m.Get("one")
+	if err != nil || v.State != "stopped" {
+		t.Fatalf("manager not closed: %+v %v", v, err)
+	}
+	if err := m.Start("one"); err == nil {
+		t.Fatal("start accepted after shutdown")
+	}
+}
+
+type pipeListener struct {
+	connections chan net.Conn
+	closed      chan struct{}
+	once        sync.Once
+}
+
+func (l *pipeListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.connections:
+		return c, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+func (l *pipeListener) Close() error   { l.once.Do(func() { close(l.closed) }); return nil }
+func (l *pipeListener) Addr() net.Addr { return pipeAddr("pipe") }
+
+type pipeAddr string
+
+func (a pipeAddr) Network() string { return string(a) }
+func (a pipeAddr) String() string  { return string(a) }

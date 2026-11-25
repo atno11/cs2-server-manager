@@ -11,3 +11,7 @@ Document existing MVP, establish regression baseline, and provide a validation e
 ## Recommended Phase 1
 
 With host-side Git initialized, review and preserve the existing MVP. Define a fixed Phase 1 checklist. Migrate definitions to SQLite with explicit migration and rollback planning; tighten lifecycle, input and secret handling; add concurrent and failure-path tests; add SSE with bounded delivery and a minimal frontend. Verify each increment against the baseline. Keep native CS2 checks pending until a verified installation and safe test plan exist. Remote hosts, downloads, RCON, scheduling, and deployment remain out of scope.
+
+## Phase 1.1
+
+Lifecycle hardening completed with fake-process regression coverage. See `phases/phase-01-1.md`. The next phase should address the remaining approved scope in separately bounded increments; do not treat simulated process tests as native CS2 validation.
