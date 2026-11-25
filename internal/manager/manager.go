@@ -2,6 +2,7 @@ package manager
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"github.com/atno11/cs2-server-manager/internal/storage"
 )
 
 type Definition struct {
@@ -61,6 +64,13 @@ type Manager struct {
 	opWG      sync.WaitGroup
 	closeErr  error
 	policy    trustPolicy
+	store     definitionStore
+}
+
+type definitionStore interface {
+	Put(storage.Definition) error
+	Delete(string) error
+	Close() error
 }
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -69,6 +79,11 @@ func New(dir string, config Policy) (*Manager, error) {
 	return newWithPreflight(dir, config, preflightLinux)
 }
 func newWithPreflight(dir string, config Policy, preflight func() error) (*Manager, error) {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	dir = absDir
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
@@ -83,6 +98,63 @@ func newWithPreflight(dir string, config Policy, preflight func() error) (*Manag
 		return nil, fmt.Errorf("Linux supervision unavailable: %w", err)
 	}
 	m := &Manager{entries: map[string]*entry{}, path: filepath.Join(dir, "instances.json"), closeDone: make(chan struct{}), policy: policy}
+	s, err := storage.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	m.store = s
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	complete, err := s.MigrationComplete(ctx)
+	if err != nil {
+		_ = s.Close()
+		return nil, err
+	}
+	var defs []Definition
+	if complete {
+		stored, loadErr := s.Load(ctx)
+		if loadErr != nil {
+			_ = s.Close()
+			return nil, loadErr
+		}
+		for _, d := range stored {
+			defs = append(defs, Definition{ID: d.ID, Executable: d.Executable, WorkDir: d.WorkDir, Port: d.Port, Args: d.Args})
+		}
+	} else {
+		defs, err = m.readLegacy()
+		if err != nil {
+			_ = s.Close()
+			return nil, err
+		}
+	}
+	for _, d := range defs {
+		if err = m.validate(d, ""); err != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("stored %s: %w", d.ID, err)
+		}
+		workInfo, statErr := os.Stat(d.WorkDir)
+		if statErr != nil {
+			_ = s.Close()
+			return nil, statErr
+		}
+		m.entries[d.ID] = &entry{def: copyDefinition(d), state: "stopped", log: newRing(m.policy.secrets...), workInfo: workInfo}
+	}
+	if !complete {
+		importDefs := make([]storage.Definition, 0, len(defs))
+		for _, d := range defs {
+			importDefs = append(importDefs, storedDefinition(d))
+		}
+		if err = s.Import(ctx, importDefs); err != nil {
+			_ = s.Close()
+			return nil, err
+		}
+	}
+	return m, nil
+}
+func storedDefinition(d Definition) storage.Definition {
+	return storage.Definition{ID: d.ID, Executable: d.Executable, WorkDir: d.WorkDir, Port: d.Port, Args: slices.Clone(d.Args)}
+}
+func (m *Manager) readLegacy() ([]Definition, error) {
 	if _, err := os.Lstat(m.path); err == nil {
 		if err := secureFile(m.path); err != nil {
 			return nil, err
@@ -92,7 +164,7 @@ func newWithPreflight(dir string, config Policy, preflight func() error) (*Manag
 	}
 	f, err := os.Open(m.path)
 	if errors.Is(err, os.ErrNotExist) {
-		return m, nil
+		return nil, nil
 	}
 	if err != nil {
 		return nil, err
@@ -112,6 +184,7 @@ func newWithPreflight(dir string, config Policy, preflight func() error) (*Manag
 	if len(rawDefs) > 32 {
 		return nil, errors.New("stored instance count exceeds 32")
 	}
+	defs := make([]Definition, 0, len(rawDefs))
 	for _, raw := range rawDefs {
 		var compact bytes.Buffer
 		if err := json.Compact(&compact, raw); err != nil {
@@ -124,13 +197,9 @@ func newWithPreflight(dir string, config Policy, preflight func() error) (*Manag
 		if err = DecodeUniqueJSON(raw, &d); err != nil {
 			return nil, err
 		}
-		if err = m.validate(d, ""); err != nil {
-			return nil, fmt.Errorf("stored %s: %w", d.ID, err)
-		}
-		workInfo, _ := os.Stat(d.WorkDir)
-		m.entries[d.ID] = &entry{def: copyDefinition(d), state: "stopped", log: newRing(m.policy.secrets...), workInfo: workInfo}
+		defs = append(defs, d)
 	}
-	return m, nil
+	return defs, nil
 }
 func copyDefinition(d Definition) Definition { d.Args = slices.Clone(d.Args); return d }
 
@@ -208,49 +277,10 @@ func containsNUL(s string) bool {
 	}
 	return false
 }
-func (m *Manager) save() error {
-	defs := make([]Definition, 0, len(m.entries))
-	for _, e := range m.entries {
-		defs = append(defs, e.def)
-	}
-	slices.SortFunc(defs, func(a, b Definition) int {
-		if a.ID < b.ID {
-			return -1
-		}
-		if a.ID > b.ID {
-			return 1
-		}
-		return 0
-	})
-	b, err := json.MarshalIndent(defs, "", "  ")
-	if err != nil {
-		return err
-	}
-	f, err := os.CreateTemp(filepath.Dir(m.path), ".instances-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if err = f.Chmod(0600); err != nil {
-		f.Close()
-		return err
-	}
-	if _, err = f.Write(b); err != nil {
-		f.Close()
-		return err
-	}
-	if err = f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err = f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(f.Name(), m.path)
-}
 func (m *Manager) Register(d Definition) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	d = copyDefinition(d)
 	if m.closed {
 		return errors.New("manager closed")
 	}
@@ -260,12 +290,14 @@ func (m *Manager) Register(d Definition) error {
 	if err := m.validate(d, ""); err != nil {
 		return err
 	}
-	workInfo, _ := os.Stat(d.WorkDir)
-	m.entries[d.ID] = &entry{def: copyDefinition(d), state: "stopped", log: newRing(m.policy.secrets...), workInfo: workInfo}
-	if err := m.save(); err != nil {
-		delete(m.entries, d.ID)
+	workInfo, err := os.Stat(d.WorkDir)
+	if err != nil {
 		return err
 	}
+	if err := m.store.Put(storedDefinition(d)); err != nil {
+		return err
+	}
+	m.entries[d.ID] = &entry{def: copyDefinition(d), state: "stopped", log: newRing(m.policy.secrets...), workInfo: workInfo}
 	return nil
 }
 func (m *Manager) Remove(id string) error {
@@ -281,11 +313,10 @@ func (m *Manager) Remove(id string) error {
 	if e.proc != nil || e.op != "" {
 		return errors.New("instance is active")
 	}
-	delete(m.entries, id)
-	if err := m.save(); err != nil {
-		m.entries[id] = e
+	if err := m.store.Delete(id); err != nil {
 		return err
 	}
+	delete(m.entries, id)
 	return nil
 }
 func view(e *entry) Instance {
@@ -770,7 +801,7 @@ func (m *Manager) Close() error {
 	}
 	wg.Wait()
 	m.mu.Lock()
-	m.closeErr = errors.Join(errs...)
+	m.closeErr = errors.Join(errors.Join(errs...), m.store.Close())
 	close(m.closeDone)
 	err := m.closeErr
 	m.mu.Unlock()

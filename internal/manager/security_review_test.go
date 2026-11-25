@@ -60,7 +60,11 @@ func TestReviewRootAndExecutableMetadataRecheck(t *testing.T) {
 
 func TestReviewPersistedDefinitionCountAndDuplicateJSON(t *testing.T) {
 	m, d, root := policyFixture(t)
-	state := filepath.Join(root, "data", "instances.json")
+	dataDir := filepath.Join(root, "legacy-data")
+	if err := os.Mkdir(dataDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(dataDir, "instances.json")
 	defs := make([]Definition, 33)
 	for i := range defs {
 		defs[i] = d
@@ -76,13 +80,13 @@ func TestReviewPersistedDefinitionCountAndDuplicateJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	policy := Policy{Executables: []string{d.Executable}, ExecutableRoots: []string{root}, WorkRoots: []string{root}}
-	if _, err := newWithPreflight(filepath.Join(root, "data"), policy, func() error { return nil }); err == nil {
+	if _, err := newWithPreflight(dataDir, policy, func() error { return nil }); err == nil {
 		t.Fatal("33 persisted definitions accepted")
 	}
 	if err := os.WriteFile(state, []byte(`[ {"id":"one","ID":"two","executable":"`+d.Executable+`","work_dir":"`+d.WorkDir+`","port":27015} ]`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newWithPreflight(filepath.Join(root, "data"), policy, func() error { return nil }); err == nil {
+	if _, err := newWithPreflight(dataDir, policy, func() error { return nil }); err == nil {
 		t.Fatal("ambiguous persisted definition accepted")
 	}
 	_ = m
@@ -177,13 +181,17 @@ func TestReviewFileCapabilityInspection(t *testing.T) {
 
 func TestReviewPersistedSizeAndNoRewrite(t *testing.T) {
 	_, d, root := policyFixture(t)
-	state := filepath.Join(root, "data", "instances.json")
+	dataDir := filepath.Join(root, "legacy-data")
+	if err := os.Mkdir(dataDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(dataDir, "instances.json")
 	policy := Policy{Executables: []string{d.Executable}, ExecutableRoots: []string{root}, WorkRoots: []string{root}}
 	for _, data := range [][]byte{[]byte(strings.Repeat("x", 512*1024+1)), []byte(`[ {"id":"one","executable":"` + d.Executable + `","work_dir":"` + d.WorkDir + `","port":27015,"args":["` + strings.Repeat("a", 16*1024) + `"]} ]`)} {
 		if err := os.WriteFile(state, data, 0600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := newWithPreflight(filepath.Join(root, "data"), policy, func() error { return nil }); err == nil {
+		if _, err := newWithPreflight(dataDir, policy, func() error { return nil }); err == nil {
 			t.Fatal("oversized persisted state accepted")
 		}
 		after, err := os.ReadFile(state)
@@ -195,13 +203,17 @@ func TestReviewPersistedSizeAndNoRewrite(t *testing.T) {
 
 func TestReviewPersistedFormattedDefinition(t *testing.T) {
 	_, d, root := policyFixture(t)
-	state := filepath.Join(root, "data", "instances.json")
+	dataDir := filepath.Join(root, "legacy-data")
+	if err := os.Mkdir(dataDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(dataDir, "instances.json")
 	body := []byte(`[{` + strings.Repeat(" ", 20*1024) + `"id":"one","executable":"` + d.Executable + `","work_dir":"` + d.WorkDir + `","port":27015}]`)
 	if err := os.WriteFile(state, body, 0600); err != nil {
 		t.Fatal(err)
 	}
 	policy := Policy{Executables: []string{d.Executable}, ExecutableRoots: []string{root}, WorkRoots: []string{root}}
-	m, err := newWithPreflight(filepath.Join(root, "data"), policy, func() error { return nil })
+	m, err := newWithPreflight(dataDir, policy, func() error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

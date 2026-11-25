@@ -144,16 +144,22 @@ func TestRuntimeAndPersistedPermissions(t *testing.T) {
 	if err := m.Register(d); err != nil {
 		t.Fatal(err)
 	}
-	fi, err := os.Stat(filepath.Join(root, "data", "instances.json"))
+	fi, err := os.Stat(filepath.Join(root, "data", "instances.db"))
 	if err != nil || fi.Mode().Perm() != 0600 {
 		t.Fatal("state file not private")
 	}
-	if err := os.Chmod(filepath.Join(root, "data", "instances.json"), 0644); err != nil {
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(root, "data", "instances.db"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	_, err = newWithPreflight(filepath.Join(root, "data"), Policy{Executables: []string{d.Executable}, ExecutableRoots: []string{root}, WorkRoots: []string{root}}, func() error { return nil })
 	if err == nil {
 		t.Fatal("unsafe state file accepted")
+	}
+	if err := os.Chmod(filepath.Join(root, "data", "instances.db"), 0600); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.Chmod(filepath.Join(root, "data"), 0755); err != nil {
 		t.Fatal(err)

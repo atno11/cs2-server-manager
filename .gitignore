@@ -44,3 +44,9 @@ coverage.out
 # Operating system
 .DS_Store
 Thumbs.db
+# Private runtime persistence and migration inputs
+instances.json
+instances.lock
+policy.json
+admin.token
+*.db-journal
