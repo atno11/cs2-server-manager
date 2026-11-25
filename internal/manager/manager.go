@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +50,7 @@ type entry struct {
 	lastTermination string
 	proc            *process
 	log             *ring
+	workInfo        os.FileInfo
 }
 type Manager struct {
 	mu        sync.Mutex
@@ -58,31 +60,75 @@ type Manager struct {
 	closeDone chan struct{}
 	opWG      sync.WaitGroup
 	closeErr  error
+	policy    trustPolicy
 }
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
-func New(dir string) (*Manager, error) {
+func New(dir string, config Policy) (*Manager, error) {
+	return newWithPreflight(dir, config, preflightLinux)
+}
+func newWithPreflight(dir string, config Policy, preflight func() error) (*Manager, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
-	m := &Manager{entries: map[string]*entry{}, path: filepath.Join(dir, "instances.json"), closeDone: make(chan struct{})}
-	b, err := os.ReadFile(m.path)
+	if err := secureDir(dir); err != nil {
+		return nil, err
+	}
+	policy, err := compilePolicy(config)
+	if err != nil {
+		return nil, err
+	}
+	if err := preflight(); err != nil {
+		return nil, fmt.Errorf("Linux supervision unavailable: %w", err)
+	}
+	m := &Manager{entries: map[string]*entry{}, path: filepath.Join(dir, "instances.json"), closeDone: make(chan struct{}), policy: policy}
+	if _, err := os.Lstat(m.path); err == nil {
+		if err := secureFile(m.path); err != nil {
+			return nil, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	f, err := os.Open(m.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return m, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var defs []Definition
-	if err = json.Unmarshal(b, &defs); err != nil {
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, 512*1024+1))
+	if err != nil {
 		return nil, err
 	}
-	for _, d := range defs {
+	if len(b) > 512*1024 {
+		return nil, errors.New("stored definitions exceed 512 KiB")
+	}
+	var rawDefs []json.RawMessage
+	if err = DecodeUniqueJSON(b, &rawDefs); err != nil {
+		return nil, err
+	}
+	if len(rawDefs) > 32 {
+		return nil, errors.New("stored instance count exceeds 32")
+	}
+	for _, raw := range rawDefs {
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, raw); err != nil {
+			return nil, err
+		}
+		if compact.Len() > 16*1024 {
+			return nil, errors.New("stored definition exceeds 16 KiB")
+		}
+		var d Definition
+		if err = DecodeUniqueJSON(raw, &d); err != nil {
+			return nil, err
+		}
 		if err = m.validate(d, ""); err != nil {
 			return nil, fmt.Errorf("stored %s: %w", d.ID, err)
 		}
-		m.entries[d.ID] = &entry{def: copyDefinition(d), state: "stopped", log: newRing()}
+		workInfo, _ := os.Stat(d.WorkDir)
+		m.entries[d.ID] = &entry{def: copyDefinition(d), state: "stopped", log: newRing(m.policy.secrets...), workInfo: workInfo}
 	}
 	return m, nil
 }
@@ -92,11 +138,22 @@ func (m *Manager) validate(d Definition, except string) error {
 	if !idPattern.MatchString(d.ID) {
 		return errors.New("invalid ID")
 	}
+	for _, secret := range m.policy.secrets {
+		if strings.Contains(d.ID, secret) || strings.Contains(fmt.Sprint(d.Port), secret) {
+			return errors.New("public instance value contains a known secret")
+		}
+	}
 	if d.Port < 1 || d.Port > 65535 {
 		return errors.New("invalid port")
 	}
 	if !filepath.IsAbs(d.Executable) || !filepath.IsAbs(d.WorkDir) {
 		return errors.New("paths must be absolute")
+	}
+	if len(d.Executable) > 4096 || len(d.WorkDir) > 4096 {
+		return errors.New("path too long")
+	}
+	if _, err := m.policy.validateDefinition(d); err != nil {
+		return err
 	}
 	fi, err := os.Stat(d.Executable)
 	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0111 == 0 {
@@ -106,20 +163,42 @@ func (m *Manager) validate(d Definition, except string) error {
 	if err != nil || !fi.IsDir() {
 		return errors.New("working directory must exist")
 	}
+	if len(d.Args) > 32 {
+		return errors.New("too many arguments")
+	}
+	total := 0
 	for _, a := range d.Args {
-		if len(a) > 1024 || len(a) == 0 || containsNUL(a) {
-			return errors.New("invalid argument")
-		}
-		if a == "-port" || a == "+hostport" {
-			return errors.New("port override is forbidden")
+		total += len(a)
+		if len(a) == 0 || len(a) > 256 || containsNUL(a) || unsafeArgument(a) || strings.HasPrefix(a, "-") || strings.HasPrefix(a, "+") {
+			return errors.New("invalid launch argument")
 		}
 	}
+	if total > 4096 {
+		return errors.New("arguments too large")
+	}
+
 	for id, e := range m.entries {
-		if id != except && (id == d.ID || e.def.Port == d.Port || e.def.WorkDir == d.WorkDir) {
+		if id != except && (id == d.ID || e.def.Port == d.Port || sameDirectory(e.def.WorkDir, d.WorkDir)) {
 			return errors.New("duplicate ID, port, or working directory")
 		}
 	}
 	return nil
+}
+func sameDirectory(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ai, ae := os.Stat(a)
+	bi, be := os.Stat(b)
+	return ae == nil && be == nil && os.SameFile(ai, bi)
+}
+func unsafeArgument(a string) bool {
+	for _, r := range a {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '.' || r == '/' || r == '-') {
+			return true
+		}
+	}
+	return false
 }
 func containsNUL(s string) bool {
 	for _, c := range s {
@@ -175,10 +254,14 @@ func (m *Manager) Register(d Definition) error {
 	if m.closed {
 		return errors.New("manager closed")
 	}
+	if len(m.entries) >= 32 {
+		return errors.New("instance limit reached")
+	}
 	if err := m.validate(d, ""); err != nil {
 		return err
 	}
-	m.entries[d.ID] = &entry{def: copyDefinition(d), state: "stopped", log: newRing()}
+	workInfo, _ := os.Stat(d.WorkDir)
+	m.entries[d.ID] = &entry{def: copyDefinition(d), state: "stopped", log: newRing(m.policy.secrets...), workInfo: workInfo}
 	if err := m.save(); err != nil {
 		delete(m.entries, d.ID)
 		return err
@@ -298,10 +381,29 @@ func (m *Manager) startReserved(e *entry) error {
 		m.mu.Unlock()
 		return err
 	}
+	currentWork, err := os.Stat(e.def.WorkDir)
+	if err != nil || !os.SameFile(e.workInfo, currentWork) {
+		m.mu.Unlock()
+		return errors.New("working directory identity changed")
+	}
 	d := copyDefinition(e.def)
 	m.mu.Unlock()
-	args := append(d.Args, "-port", fmt.Sprint(d.Port))
-	cmd := exec.Command(d.Executable, args...)
+	if err := preflightLinux(); err != nil {
+		return fmt.Errorf("Linux supervision unavailable: %w", err)
+	}
+	execFile, err := m.policy.openExecutable(d.Executable)
+	if err != nil {
+		return err
+	}
+	defer execFile.Close()
+	if _, err = execFile.Seek(0, 0); err != nil {
+		return err
+	}
+	args := append(slices.Clone(d.Args), m.policy.baseArgs...)
+	args = append(args, "-port", fmt.Sprint(d.Port))
+	cmd := exec.Command("/proc/self/fd/3", args...)
+	cmd.Args[0] = d.Executable
+	cmd.ExtraFiles = []*os.File{execFile}
 	cmd.Dir = d.WorkDir
 	pidfd := -1
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, PidFD: &pidfd}
@@ -419,6 +521,7 @@ func (m *Manager) wait(e *entry, p *process) {
 		cleanupErr = m.cleanupGroup(e, p)
 	}
 	err := p.cmd.Wait()
+	e.log.Flush()
 	_ = syscall.Close(p.pidfd)
 	m.mu.Lock()
 	if e.proc == p {
@@ -677,25 +780,91 @@ func (m *Manager) Close() error {
 const logLimit = 64 * 1024
 
 type ring struct {
-	mu sync.Mutex
-	b  []byte
+	mu        sync.Mutex
+	b         []byte
+	pending   []byte
+	secrets   [][]byte
+	longest   int
+	covered   int
+	redacting bool
 }
 
-func newRing() *ring { return &ring{b: make([]byte, 0, logLimit)} }
+func newRing(secrets ...string) *ring {
+	r := &ring{b: make([]byte, 0, logLimit)}
+	for _, s := range secrets {
+		if len(s) < 4 {
+			continue
+		}
+		v := []byte(s)
+		r.secrets = append(r.secrets, v)
+		if len(v) > r.longest {
+			r.longest = len(v)
+		}
+	}
+	return r
+}
+func (r *ring) appendBounded(p []byte) {
+	if len(p) >= logLimit {
+		r.b = append(r.b[:0], p[len(p)-logLimit:]...)
+		return
+	}
+	if len(r.b)+len(p) > logLimit {
+		r.b = append(r.b[:0], r.b[len(r.b)+len(p)-logLimit:]...)
+	}
+	r.b = append(r.b, p...)
+}
+func (r *ring) drain(all bool) {
+	if r.longest == 0 {
+		r.appendBounded(r.pending)
+		r.pending = r.pending[:0]
+		return
+	}
+	limit := len(r.pending) - r.longest + 1
+	if all {
+		limit = len(r.pending)
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	out := make([]byte, 0, limit)
+	for i := 0; i < limit; i++ {
+		for _, secret := range r.secrets {
+			if len(r.pending)-i >= len(secret) && bytes.Equal(r.pending[i:i+len(secret)], secret) {
+				if len(secret) > r.covered {
+					r.covered = len(secret)
+				}
+			}
+		}
+		if r.covered > 0 {
+			if !r.redacting {
+				out = append(out, []byte("[REDACTED]")...)
+				r.redacting = true
+			}
+			r.covered--
+		} else {
+			r.redacting = false
+			out = append(out, r.pending[i])
+		}
+	}
+	r.appendBounded(out)
+	r.pending = append(r.pending[:0], r.pending[limit:]...)
+}
 func (r *ring) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	n := len(p)
-	if n >= logLimit {
-		r.b = append(r.b[:0], p[n-logLimit:]...)
-		return n, nil
+	for len(p) > 0 {
+		chunk := len(p)
+		if chunk > 4096 {
+			chunk = 4096
+		}
+		r.pending = append(r.pending, p[:chunk]...)
+		r.drain(false)
+		p = p[chunk:]
 	}
-	if len(r.b)+n > logLimit {
-		r.b = append(r.b[:0], r.b[len(r.b)+n-logLimit:]...)
-	}
-	r.b = append(r.b, p...)
 	return n, nil
 }
+func (r *ring) Flush()         { r.mu.Lock(); defer r.mu.Unlock(); r.drain(true) }
 func (r *ring) String() string { r.mu.Lock(); defer r.mu.Unlock(); return string(r.b) }
 
 var _ io.Writer = (*ring)(nil)

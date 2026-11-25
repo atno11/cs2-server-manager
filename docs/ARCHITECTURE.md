@@ -17,3 +17,11 @@ The registry mutex protects definitions, state, and one operation reservation pe
 ## Phase 1.1.1 review correction
 
 The independent review identified an unsafe post-reap process-group signal in Phase 1.1. Supervision now keeps the leader waitable with `waitid(WNOWAIT)` until group cleanup completes, and uses a pidfd process-group signal rather than a negative PGID. Close returns a shared result; HTTP shutdown errors are propagated. See `phases/phase-01-1-1.md` for ownership requirements and limits. The prior Phase 1.1 description is historical.
+
+## Phase 1.2 security boundary
+
+The local operator supplies `policy.json`, defining exact executable identities and working roots. `internal/manager` pins trusted executable device/inode/hash, revalidates before launch, and executes through an open descriptor. HTTP registration cannot modify this policy. `internal/security` creates and checks a private random admin bearer token. `cmd/cs2m` enforces exact loopback Host and Origin, authentication, strict routes and JSON, connection/request limits, and a public response model. Known secrets are redacted from bounded logs. Linux supervision capabilities are probed before managed launches. See [SECURITY.md](SECURITY.md) and [Phase 1.2](phases/phase-01-2.md) for limits and evidence.
+
+## Phase 1.2.1 review correction
+
+The trust-policy boundaries are rechecked at each launch, including root metadata and executable privilege attributes. All JSON input paths use duplicate-key detection. Persisted definitions are bounded before loading. The redactor tracks overlapping secret intervals in captured logs; public instance values are validated before serialization, and API errors have no body. Descriptor execution retains the authorized path in `argv[0]`; native CS2 compatibility is still unverified. See `phases/phase-01-2-1.md`.
