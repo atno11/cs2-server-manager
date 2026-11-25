@@ -1,0 +1,3 @@
+# Phase 0: environment audit
+
+The read-only audit found Arch Linux amd64, Go 1.27.3, and an existing source tree. The workspace is writable to `atno`, but `.git` is an empty read-only tmpfs mount. Git does not recognize the workspace as a repository. SteamCMD and a runnable CS2 installation were not verified. No relevant process was visible; host-wide port inspection was restricted. The ext4 workspace mount has substantial free space. The full fixed P0 checklist and evidence were reported in the Phase 0 conversation. `../../AUDIT.md` is retained as historical Phase 1 MVP evidence and should not be mistaken for a current Git or native CS2 validation result.

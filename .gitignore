@@ -1,0 +1,46 @@
+# Build artifacts
+/bin/
+/build/
+/dist/
+/cs2m
+*.exe
+*.test
+*.out
+
+# Coverage and test artifacts
+/coverage/
+coverage.out
+*.prof
+
+# Runtime data
+/data/
+/logs/
+/servers/
+*.log
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+/secrets/
+/config.local.json
+
+# Temporary files
+/tmp/
+.cache/
+*.tmp
+
+# IDE and editor artifacts
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Operating system
+.DS_Store
+Thumbs.db
