@@ -19,20 +19,28 @@ func streamEvents(w http.ResponseWriter, r *http.Request, m *manager.Manager, he
 		return
 	}
 	defer sub.Cancel()
+	controller := http.NewResponseController(w)
+	if err := controller.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		writeError(w, http.StatusServiceUnavailable)
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	controller := http.NewResponseController(w)
+	firstWrite := true
 	write := func(frame string) bool {
-		_ = controller.SetWriteDeadline(time.Now().Add(writeTimeout))
+		if firstWrite {
+			firstWrite = false
+		} else if err := controller.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+			return false
+		}
 		if _, err := w.Write([]byte(frame)); err != nil {
 			return false
 		}
 		if err := controller.Flush(); err != nil {
 			return false
 		}
-		_ = controller.SetWriteDeadline(time.Now().Add(heartbeat + writeTimeout))
-		return true
+		return controller.SetWriteDeadline(time.Now().Add(heartbeat+writeTimeout)) == nil
 	}
 	if !write(eventFrame(snapshot)) {
 		return

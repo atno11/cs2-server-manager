@@ -10,11 +10,175 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/atno11/cs2-server-manager/internal/manager"
 )
+
+type controlledStreamWriter struct {
+	mu             sync.Mutex
+	status         int
+	writes         int
+	started        chan struct{}
+	blocked        chan struct{}
+	release        chan struct{}
+	deadlineErr    error
+	deadlineCalls  int
+	failDeadlineAt int
+}
+
+func (w *controlledStreamWriter) Header() http.Header  { return make(http.Header) }
+func (w *controlledStreamWriter) WriteHeader(code int) { w.mu.Lock(); w.status = code; w.mu.Unlock() }
+func (w *controlledStreamWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	w.writes++
+	n := w.writes
+	w.mu.Unlock()
+	if n == 1 && w.started != nil {
+		close(w.started)
+	}
+	if n == 2 {
+		close(w.blocked)
+		<-w.release
+	}
+	return len(p), nil
+}
+func (w *controlledStreamWriter) Flush() {}
+func (w *controlledStreamWriter) SetWriteDeadline(time.Time) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.deadlineCalls++
+	if w.failDeadlineAt == 0 || w.deadlineCalls == w.failDeadlineAt {
+		return w.deadlineErr
+	}
+	return nil
+}
+
+func TestSSEDeadlineSetupFailureRejectsBeforeHeaders(t *testing.T) {
+	m, token, _ := sseManager(t)
+	w := &controlledStreamWriter{blocked: make(chan struct{}), release: make(chan struct{}), deadlineErr: io.ErrClosedPipe}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	r := httptest.NewRequest("GET", "http://127.0.0.1:8080/api/events", nil).WithContext(ctx)
+	r.Header.Set("Authorization", "Bearer "+token)
+	handler(m, token, "127.0.0.1:8080").ServeHTTP(w, r)
+	if w.status != 503 || w.writes != 0 || m.EventSubscriberCount() != 0 {
+		t.Fatalf("unsafe stream setup: status=%d writes=%d subscribers=%d", w.status, w.writes, m.EventSubscriberCount())
+	}
+}
+
+func TestSSEDeadlineRefreshFailureEndsCommittedStream(t *testing.T) {
+	m, token, _ := sseManager(t)
+	w := &controlledStreamWriter{blocked: make(chan struct{}), release: make(chan struct{}), deadlineErr: io.ErrClosedPipe, failDeadlineAt: 2}
+	r := httptest.NewRequest("GET", "http://127.0.0.1:8080/api/events", nil)
+	r.Header.Set("Authorization", "Bearer "+token)
+	handler(m, token, "127.0.0.1:8080").ServeHTTP(w, r)
+	if w.status != 200 || w.writes != 1 || w.deadlineCalls != 2 || m.EventSubscriberCount() != 0 {
+		t.Fatalf("failed refresh retained stream: status=%d writes=%d deadline calls=%d subscribers=%d", w.status, w.writes, w.deadlineCalls, m.EventSubscriberCount())
+	}
+}
+
+func TestSSEOverflowKeepsHTTPHandlerReservations(t *testing.T) {
+	m, token, d := sseManager(t)
+	h := handler(m, token, "127.0.0.1:8080")
+	writers := make([]*controlledStreamWriter, 8)
+	done := make([]chan struct{}, 8)
+	released := false
+	for i := range writers {
+		w := &controlledStreamWriter{started: make(chan struct{}), blocked: make(chan struct{}), release: make(chan struct{})}
+		writers[i] = w
+		done[i] = make(chan struct{})
+		r := httptest.NewRequest("GET", "http://127.0.0.1:8080/api/events", nil)
+		r.Header.Set("Authorization", "Bearer "+token)
+		go func(i int) { h.ServeHTTP(w, r); close(done[i]) }(i)
+	}
+	defer func() {
+		if !released {
+			for _, w := range writers {
+				close(w.release)
+			}
+			for _, ch := range done {
+				<-ch
+			}
+		}
+	}()
+	for _, w := range writers {
+		select {
+		case <-w.started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("stream did not start")
+		}
+	}
+	if err := m.Register(d); err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range writers {
+		select {
+		case <-w.blocked:
+		case <-time.After(3 * time.Second):
+			t.Fatal("stream did not reach blocked write")
+		}
+	}
+	for i := 0; i < 65; i++ {
+		if err := m.Remove(d.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Register(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := m.EventSubscriberCount(); got != 0 {
+		t.Fatalf("overflow retained %d broker subscribers", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequest("GET", "http://127.0.0.1:8080/api/events", nil).WithContext(ctx)
+	request.Header.Set("Authorization", "Bearer "+token)
+	out := httptest.NewRecorder()
+	result := make(chan struct{})
+	go func() { h.ServeHTTP(out, request); close(result) }()
+	select {
+	case <-result:
+	case <-time.After(time.Second):
+		cancel()
+		<-result
+		t.Fatal("ninth HTTP handler entered")
+	}
+	if out.Code != 503 {
+		t.Fatalf("ninth HTTP handler entered: %d", out.Code)
+	}
+	admin := httptest.NewRequest("GET", "http://127.0.0.1:8080/api/instances", nil)
+	admin.Header.Set("Authorization", "Bearer "+token)
+	adminOut := httptest.NewRecorder()
+	h.ServeHTTP(adminOut, admin)
+	if adminOut.Code != 200 {
+		t.Fatalf("administrative request blocked by stream reservations: %d", adminOut.Code)
+	}
+	for _, w := range writers {
+		close(w.release)
+	}
+	for _, ch := range done {
+		<-ch
+	}
+	released = true
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	req2 := httptest.NewRequest("GET", "http://127.0.0.1:8080/api/events", nil).WithContext(ctx2)
+	req2.Header.Set("Authorization", "Bearer "+token)
+	out2 := &controlledStreamWriter{started: make(chan struct{}), blocked: make(chan struct{}), release: make(chan struct{})}
+	done2 := make(chan struct{})
+	go func() { h.ServeHTTP(out2, req2); close(done2) }()
+	select {
+	case <-out2.started:
+	case <-time.After(time.Second):
+		cancel2()
+		<-done2
+		t.Fatal("stream slot was not released")
+	}
+	cancel2()
+	<-done2
+}
 
 func sseManager(t *testing.T) (*manager.Manager, string, manager.Definition) {
 	t.Helper()

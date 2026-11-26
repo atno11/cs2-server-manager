@@ -40,6 +40,8 @@ Phase 1.3.1 closes the storage static-review findings on the same feature branch
 
 Phase 1.4 adds bounded SSE state and sanitized log delivery on `feat/realtime-events`, with a single authenticated browser stream. Its implementation and validation are recorded in `phases/phase-01-4.md`. Native CS2 validation and later roadmap work remain separate.
 
+Phase 1.4.1 reviews effective SSE handler capacity, log reconciliation and write deadline failures before merge. Confirmed defects and regression evidence are recorded in `phases/phase-01-4-1.md`. This review does not start Phase 1.5 or change the approved sequence below.
+
 ## Approved sequence after Phase 1.4
 
 The product direction is API-first and headless. The daemon must remain independent of client UIs. The current HTML/JavaScript page is a temporary validation client. The first official interactive client is the TUI, which must consume the public API rather than manager internals. A CLI for administrative automation remains planned; the optional default Web UI is a later client. Custom clients may use the documented public REST and SSE API.

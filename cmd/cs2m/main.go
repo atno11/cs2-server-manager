@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/atno11/cs2-server-manager/internal/events"
 	"github.com/atno11/cs2-server-manager/internal/manager"
 	"github.com/atno11/cs2-server-manager/internal/security"
 )
@@ -130,6 +131,7 @@ func handlerWithHeartbeat(m *manager.Manager, token, authority string, heartbeat
 }
 func handlerWithStreamConfig(m *manager.Manager, token, authority string, heartbeat, writeTimeout time.Duration) http.Handler {
 	mux := http.NewServeMux()
+	streamSlots := make(chan struct{}, events.MaxSubscribers)
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -141,7 +143,16 @@ func handlerWithStreamConfig(m *manager.Manager, token, authority string, heartb
 		_, _ = io.WriteString(w, browserScript)
 	})
 	mux.HandleFunc("GET /api/instances", func(w http.ResponseWriter, r *http.Request) { respond(w, 200, publicList(m.List())) })
-	mux.HandleFunc("GET /api/events", func(w http.ResponseWriter, r *http.Request) { streamEvents(w, r, m, heartbeat, writeTimeout) })
+	mux.HandleFunc("GET /api/events", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case streamSlots <- struct{}{}:
+			defer func() { <-streamSlots }()
+		default:
+			writeError(w, http.StatusServiceUnavailable)
+			return
+		}
+		streamEvents(w, r, m, heartbeat, writeTimeout)
+	})
 	mux.HandleFunc("POST /api/instances", func(w http.ResponseWriter, r *http.Request) {
 		media, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		if err != nil || media != "application/json" || (params["charset"] != "" && !strings.EqualFold(params["charset"], "utf-8")) {
