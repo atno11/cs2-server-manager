@@ -65,6 +65,108 @@ func TestSchemaAndSettings(t *testing.T) {
 		}
 	}
 }
+
+func TestConnectionSettingsAfterReplacement(t *testing.T) {
+	s, _ := openTestStore(t)
+	check := func() {
+		t.Helper()
+		for pragma, want := range map[string]string{"busy_timeout": "1000", "journal_mode": "delete", "synchronous": "2", "foreign_keys": "1", "temp_store": "2"} {
+			var got string
+			if err := s.db.QueryRow("PRAGMA " + pragma).Scan(&got); err != nil || got != want {
+				t.Fatalf("%s=%q want %q: %v", pragma, got, want, err)
+			}
+		}
+	}
+	check()
+	s.db.SetMaxIdleConns(0)
+	if err := s.db.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	check()
+}
+
+func TestVersionOneSchemaCompatibility(t *testing.T) {
+	cases := []struct{ name, change string }{
+		{"missing column", `DROP TABLE instances; CREATE TABLE instances(id TEXT PRIMARY KEY NOT NULL)`},
+		{"missing unique", `DROP TABLE instances; CREATE TABLE instances(id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 64), executable TEXT NOT NULL, work_dir TEXT NOT NULL, port INTEGER NOT NULL UNIQUE CHECK(port BETWEEN 1 AND 65535), args_json TEXT NOT NULL CHECK(json_valid(args_json)))`},
+		{"incompatible type", `DROP TABLE instances; CREATE TABLE instances(id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 64), executable BLOB NOT NULL, work_dir TEXT NOT NULL UNIQUE, port INTEGER NOT NULL UNIQUE CHECK(port BETWEEN 1 AND 65535), args_json TEXT NOT NULL CHECK(json_valid(args_json)))`},
+		{"unexpected foreign key", `DROP TABLE instances; CREATE TABLE instances(id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 64), executable TEXT NOT NULL, work_dir TEXT NOT NULL UNIQUE REFERENCES instances(id), port INTEGER NOT NULL UNIQUE CHECK(port BETWEEN 1 AND 65535), args_json TEXT NOT NULL CHECK(json_valid(args_json)))`},
+		{"missing check", `DROP TABLE instances; CREATE TABLE instances(id TEXT PRIMARY KEY NOT NULL, executable TEXT NOT NULL, work_dir TEXT NOT NULL UNIQUE, port INTEGER NOT NULL UNIQUE CHECK(port BETWEEN 1 AND 65535), args_json TEXT NOT NULL CHECK(json_valid(args_json)))`},
+		{"invalid metadata", `PRAGMA ignore_check_constraints=ON; INSERT INTO migration_state VALUES(2,1)`},
+		{"unexpected trigger", `CREATE TRIGGER extra AFTER INSERT ON instances BEGIN SELECT 1; END`},
+		{"unexpected index", `CREATE INDEX extra ON instances(executable)`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, dir := openTestStore(t)
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "instances.db")
+			raw, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: path}).String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(tc.change); err != nil {
+				t.Fatal(err)
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			legacy := filepath.Join(dir, "instances.json")
+			if err := os.WriteFile(legacy, []byte(`{"sentinel":true}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(dir); err == nil {
+				t.Fatal("incompatible schema accepted")
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Fatal("database replaced", err)
+			}
+			data, err := os.ReadFile(legacy)
+			if err != nil || string(data) != `{"sentinel":true}` {
+				t.Fatalf("legacy input changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsOversizedUTF8AndInvalidTypes(t *testing.T) {
+	s, _ := openTestStore(t)
+	if err := s.Import(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range []any{`"` + strings.Repeat("é", 9000) + `"`, []byte("[]")} {
+		if _, err := s.db.Exec(`INSERT INTO instances VALUES('bad','/x','/bad',27015,?)`, args); err != nil {
+			if _, ok := args.([]byte); ok {
+				continue
+			} // SQLite JSON constraint may reject a blob itself.
+			t.Fatal(err)
+		}
+		if _, err := s.Load(context.Background()); err == nil {
+			t.Fatal("invalid stored value accepted")
+		}
+		if _, err := s.db.Exec(`DELETE FROM instances`); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestLoadRejectsMalformedArguments(t *testing.T) {
+	s, _ := openTestStore(t)
+	if err := s.Import(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO instances VALUES('bad','/x','/bad',27015,'not-json')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Load(context.Background()); err == nil {
+		t.Fatal("malformed arguments accepted")
+	}
+}
 func TestTransactionalImportRetryAndReplay(t *testing.T) {
 	s, dir := openTestStore(t)
 	ctx := context.Background()
@@ -207,6 +309,68 @@ func TestBusyDatabaseIsBounded(t *testing.T) {
 	}
 	if time.Since(start) > 3*time.Second {
 		t.Fatalf("locked write exceeded bound: %v", time.Since(start))
+	}
+}
+
+func TestFailedCommitRollsBackAndConnectionRecovers(t *testing.T) {
+	s, dir := openTestStore(t)
+	if err := s.Import(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	other, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(dir, "instances.db")}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	reader, err := other.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := reader.QueryRow("SELECT count(*) FROM instances").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := insert(context.Background(), writer, testDef("blocked", 27015)); err != nil {
+		t.Fatalf("write before commit: %v", err)
+	}
+	if err := writer.Commit(); err == nil {
+		t.Fatal("commit unexpectedly succeeded under read lock")
+	}
+	if err := reader.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	defs, err := s.Load(context.Background())
+	if err != nil || len(defs) != 0 {
+		t.Fatalf("partial write or unusable connection: %v %#v", err, defs)
+	}
+	if err := s.Put(testDef("retry", 27015)); err != nil {
+		t.Fatalf("retry after failed commit: %v", err)
+	}
+}
+
+func TestCanceledTransactionReleasesConnection(t *testing.T) {
+	s, _ := openTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO instances VALUES('cancel','/x','/cancel',27015,'[]')`); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if err := tx.Commit(); err == nil {
+		t.Fatal("canceled transaction committed")
+	}
+	queryCtx, queryCancel := context.WithTimeout(context.Background(), operationTimeout)
+	defer queryCancel()
+	defs, err := s.Load(queryCtx)
+	if err != nil || len(defs) != 0 {
+		t.Fatalf("canceled transaction left data or connection unusable: %v %#v", err, defs)
 	}
 }
 func TestParameterValuesAndInvalidSchema(t *testing.T) {

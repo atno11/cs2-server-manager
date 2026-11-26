@@ -112,6 +112,13 @@ func Open(dir string) (_ *Store, err error) {
 		return nil, err
 	}
 	uri := (&url.URL{Scheme: "file", Path: path}).String()
+	params := url.Values{}
+	params.Add("_pragma", "busy_timeout(1000)")
+	params.Add("_pragma", "journal_mode(DELETE)")
+	params.Add("_pragma", "synchronous(FULL)")
+	params.Add("_pragma", "foreign_keys(ON)")
+	params.Add("_pragma", "temp_store(MEMORY)")
+	uri += "?" + params.Encode()
 	s.db, err = sql.Open("sqlite", uri)
 	if err != nil {
 		return nil, err
@@ -123,16 +130,13 @@ func Open(dir string) (_ *Store, err error) {
 	if err = s.db.PingContext(ctx); err != nil {
 		return nil, err
 	}
-	for _, p := range []struct{ set, read, want string }{
-		{"PRAGMA busy_timeout=1000", "PRAGMA busy_timeout", "1000"},
-		{"PRAGMA journal_mode=DELETE", "PRAGMA journal_mode", "delete"},
-		{"PRAGMA synchronous=FULL", "PRAGMA synchronous", "2"},
-		{"PRAGMA foreign_keys=ON", "PRAGMA foreign_keys", "1"},
-		{"PRAGMA temp_store=MEMORY", "PRAGMA temp_store", "2"},
+	for _, p := range []struct{ read, want string }{
+		{"PRAGMA busy_timeout", "1000"},
+		{"PRAGMA journal_mode", "delete"},
+		{"PRAGMA synchronous", "2"},
+		{"PRAGMA foreign_keys", "1"},
+		{"PRAGMA temp_store", "2"},
 	} {
-		if _, err = s.db.ExecContext(ctx, p.set); err != nil {
-			return nil, err
-		}
 		var got string
 		if err = s.db.QueryRowContext(ctx, p.read).Scan(&got); err != nil {
 			return nil, err
@@ -194,13 +198,7 @@ func (s *Store) init(ctx context.Context) error {
 		}
 		return tx.Commit()
 	}
-	for _, table := range []string{"instances", "migration_state"} {
-		var name string
-		if err := s.db.QueryRowContext(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&name); err != nil {
-			return fmt.Errorf("database schema incomplete: %w", err)
-		}
-	}
-	return nil
+	return s.validateSchema(ctx)
 }
 func (s *Store) path() string { return filepath.Join(filepath.Dir(s.lock.Name()), "instances.db") }
 func (s *Store) MigrationComplete(ctx context.Context) (bool, error) {
@@ -292,14 +290,14 @@ func (s *Store) Delete(id string) error {
 	return tx.Commit()
 }
 func (s *Store) Load(ctx context.Context) ([]Definition, error) {
-	var count, maxID, maxExec, maxWork, maxArgs int
-	if err := s.db.QueryRowContext(ctx, "SELECT count(*),coalesce(max(length(id)),0),coalesce(max(length(executable)),0),coalesce(max(length(work_dir)),0),coalesce(max(length(args_json)),0) FROM instances").Scan(&count, &maxID, &maxExec, &maxWork, &maxArgs); err != nil {
+	var count, maxID, maxExec, maxWork, maxArgs, invalidTypes int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*),coalesce(max(length(CAST(id AS BLOB))),0),coalesce(max(length(CAST(executable AS BLOB))),0),coalesce(max(length(CAST(work_dir AS BLOB))),0),coalesce(max(length(CAST(args_json AS BLOB))),0),coalesce(sum(CASE WHEN typeof(id)!='text' OR typeof(executable)!='text' OR typeof(work_dir)!='text' OR typeof(port)!='integer' OR typeof(args_json)!='text' THEN 1 ELSE 0 END),0) FROM instances`).Scan(&count, &maxID, &maxExec, &maxWork, &maxArgs, &invalidTypes); err != nil {
 		return nil, err
 	}
-	if count > 32 || maxID > 64 || maxExec > 4096 || maxWork > 4096 || maxArgs > 16*1024 {
+	if count > 32 || maxID > 64 || maxExec > 4096 || maxWork > 4096 || maxArgs > 16*1024 || invalidTypes != 0 {
 		return nil, errors.New("stored database definitions exceed limits")
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT id,executable,work_dir,port,args_json FROM instances ORDER BY id")
+	rows, err := s.db.QueryContext(ctx, "SELECT id,executable,work_dir,port,args_json FROM instances ORDER BY id LIMIT 33")
 	if err != nil {
 		return nil, err
 	}
