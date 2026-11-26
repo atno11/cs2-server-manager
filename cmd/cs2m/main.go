@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -77,6 +78,7 @@ func serveWithTimeout(ctx context.Context, srv *http.Server, listener net.Listen
 	shutdownResult := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
+		m.StopEvents()
 		shutdownCtx, finish := context.WithTimeout(context.Background(), timeout)
 		defer finish()
 		err := srv.Shutdown(shutdownCtx)
@@ -121,13 +123,25 @@ func publicList(v []manager.Instance) []publicInstance {
 	return out
 }
 func handler(m *manager.Manager, token, authority string) http.Handler {
+	return handlerWithHeartbeat(m, token, authority, 15*time.Second)
+}
+func handlerWithHeartbeat(m *manager.Manager, token, authority string, heartbeat time.Duration) http.Handler {
+	return handlerWithStreamConfig(m, token, authority, heartbeat, streamWriteTimeout)
+}
+func handlerWithStreamConfig(m *manager.Manager, token, authority string, heartbeat, writeTimeout time.Duration) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		_, _ = io.WriteString(w, page)
+		_, _ = io.WriteString(w, htmlPage)
+	})
+	mux.HandleFunc("GET /ui.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(w, browserScript)
 	})
 	mux.HandleFunc("GET /api/instances", func(w http.ResponseWriter, r *http.Request) { respond(w, 200, publicList(m.List())) })
+	mux.HandleFunc("GET /api/events", func(w http.ResponseWriter, r *http.Request) { streamEvents(w, r, m, heartbeat, writeTimeout) })
 	mux.HandleFunc("POST /api/instances", func(w http.ResponseWriter, r *http.Request) {
 		media, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		if err != nil || media != "application/json" || (params["charset"] != "" && !strings.EqualFold(params["charset"], "utf-8")) {
@@ -182,12 +196,14 @@ func handler(m *manager.Manager, token, authority string) http.Handler {
 		})
 	}
 	mux.HandleFunc("GET /api/instances/{id}/logs", func(w http.ResponseWriter, r *http.Request) {
-		out, err := m.Logs(r.PathValue("id"))
+		out, start, end, err := m.LogsSnapshot(r.PathValue("id"))
 		if err != nil {
 			writeError(w, 404)
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Log-Start", strconv.FormatUint(start, 10))
+		w.Header().Set("X-Log-End", strconv.FormatUint(end, 10))
 		_, _ = io.WriteString(w, out)
 	})
 	sem := make(chan struct{}, 64)
@@ -234,6 +250,8 @@ type statusOnlyWriter struct {
 	suppressBody bool
 }
 
+func (w *statusOnlyWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *statusOnlyWriter) WriteHeader(code int) {
 	if w.wroteHeader {
 		return
@@ -272,10 +290,3 @@ func respond(w http.ResponseWriter, code int, v any) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }
-
-const page = `<!doctype html><html><head><meta charset="utf-8"><title>CS2 Server Manager</title><style>body{font:16px system-ui;max-width:900px;margin:2rem auto;padding:0 1rem}table{border-collapse:collapse;width:100%}td,th{padding:.6rem;border-bottom:1px solid #ccc;text-align:left}button{margin:.15rem}</style></head><body><h1>CS2 Server Manager</h1><label>Administrator token <input id="token" type="password" autocomplete="off"></label><button id="connect">Connect</button><table><thead><tr><th>ID</th><th>Port</th><th>State</th><th>Operations</th></tr></thead><tbody id="instances"></tbody></table><h2>Register</h2><form id="form"><input name="id" placeholder="ID" required><input name="executable" placeholder="Trusted executable path" required><input name="work_dir" placeholder="Allowed work directory" required><input name="port" type="number" min="1" max="65535" placeholder="Port" required><button>Register</button></form><pre id="output"></pre><script>
-let token='';const output=document.getElementById('output');
-async function api(path,options={}){options.headers={...(options.headers||{}),Authorization:'Bearer '+token};let r=await fetch(path,options);if(!r.ok)throw Error('Request failed ('+r.status+')');return r}
-async function refresh(){try{let rows=await (await api('/api/instances')).json();let body=document.getElementById('instances');body.replaceChildren();for(let item of rows){let tr=document.createElement('tr');for(let value of [item.id,item.port,item.state]){let td=document.createElement('td');td.textContent=value;tr.append(td)}let td=document.createElement('td');for(let action of ['start','stop','restart','logs']){let b=document.createElement('button');b.textContent=action;b.onclick=async()=>{try{if(action==='logs')output.textContent=await (await api('/api/instances/'+encodeURIComponent(item.id)+'/logs')).text();else{await api('/api/instances/'+encodeURIComponent(item.id)+'/'+action,{method:'POST'});await refresh()}}catch(e){output.textContent=e.message}};td.append(b)}tr.append(td);body.append(tr)}}catch(e){output.textContent=e.message}}
-document.getElementById('connect').onclick=()=>{token=document.getElementById('token').value;document.getElementById('token').value='';refresh()};document.getElementById('form').onsubmit=async e=>{e.preventDefault();let d=Object.fromEntries(new FormData(e.target));d.port=Number(d.port);d.args=[];try{await api('/api/instances',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});await refresh()}catch(err){output.textContent=err.message}};
-</script></body></html>`

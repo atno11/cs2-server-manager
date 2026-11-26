@@ -1,0 +1,12 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>CS2 Server Manager</title><style>
+body{font:16px system-ui;max-width:900px;margin:2rem auto;padding:0 1rem}
+table{border-collapse:collapse;width:100%}td,th{padding:.6rem;border-bottom:1px solid #ccc;text-align:left}button{margin:.15rem}
+</style></head><body>
+<h1>CS2 Server Manager</h1>
+<label>Administrator token <input id="token" type="password" autocomplete="off"></label><button id="connect">Connect</button>
+<span id="connection" role="status">Disconnected</span>
+<table><thead><tr><th>ID</th><th>Port</th><th>State</th><th>Operations</th></tr></thead><tbody id="instances"></tbody></table>
+<h2>Register</h2><form id="form"><input name="id" placeholder="ID" required><input name="executable" placeholder="Trusted executable path" required><input name="work_dir" placeholder="Allowed work directory" required><input name="port" type="number" min="1" max="65535" placeholder="Port" required><button>Register</button></form>
+<pre id="output"></pre><script src="/ui.js"></script>
+</body></html>

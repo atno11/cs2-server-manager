@@ -19,6 +19,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/atno11/cs2-server-manager/internal/events"
 	"github.com/atno11/cs2-server-manager/internal/storage"
 )
 
@@ -65,6 +66,7 @@ type Manager struct {
 	closeErr  error
 	policy    trustPolicy
 	store     definitionStore
+	events    *events.Broker
 }
 
 type definitionStore interface {
@@ -97,7 +99,7 @@ func newWithPreflight(dir string, config Policy, preflight func() error) (*Manag
 	if err := preflight(); err != nil {
 		return nil, fmt.Errorf("Linux supervision unavailable: %w", err)
 	}
-	m := &Manager{entries: map[string]*entry{}, path: filepath.Join(dir, "instances.json"), closeDone: make(chan struct{}), policy: policy}
+	m := &Manager{entries: map[string]*entry{}, path: filepath.Join(dir, "instances.json"), closeDone: make(chan struct{}), policy: policy, events: events.New()}
 	s, err := storage.Open(dir)
 	if err != nil {
 		return nil, err
@@ -137,7 +139,7 @@ func newWithPreflight(dir string, config Policy, preflight func() error) (*Manag
 			_ = s.Close()
 			return nil, statErr
 		}
-		m.entries[d.ID] = &entry{def: copyDefinition(d), state: "stopped", log: newRing(m.policy.secrets...), workInfo: workInfo}
+		m.entries[d.ID] = m.newEntry(d, workInfo)
 	}
 	if !complete {
 		importDefs := make([]storage.Definition, 0, len(defs))
@@ -297,7 +299,9 @@ func (m *Manager) Register(d Definition) error {
 	if err := m.store.Put(storedDefinition(d)); err != nil {
 		return err
 	}
-	m.entries[d.ID] = &entry{def: copyDefinition(d), state: "stopped", log: newRing(m.policy.secrets...), workInfo: workInfo}
+	e := m.newEntry(d, workInfo)
+	m.entries[d.ID] = e
+	m.publishInstanceLocked("instance.registered", e)
 	return nil
 }
 func (m *Manager) Remove(id string) error {
@@ -317,6 +321,7 @@ func (m *Manager) Remove(id string) error {
 		return err
 	}
 	delete(m.entries, id)
+	m.publishRemovedLocked(id)
 	return nil
 }
 func view(e *entry) Instance {
@@ -349,13 +354,17 @@ func (m *Manager) Get(id string) (Instance, error) {
 	return Instance{}, os.ErrNotExist
 }
 func (m *Manager) Logs(id string) (string, error) {
+	out, _, _, err := m.LogsSnapshot(id)
+	return out, err
+}
+func (m *Manager) LogsSnapshot(id string) (string, uint64, uint64, error) {
 	m.mu.Lock()
 	e := m.entries[id]
 	m.mu.Unlock()
 	if e == nil {
-		return "", os.ErrNotExist
+		return "", 0, 0, os.ErrNotExist
 	}
-	return e.log.String(), nil
+	return e.log.Snapshot()
 }
 
 const gracefulTimeout = 2 * time.Second
@@ -444,6 +453,7 @@ func (m *Manager) startReserved(e *entry) error {
 		m.mu.Lock()
 		e.state = "failed"
 		e.err = err.Error()
+		m.publishInstanceLocked("instance.state", e)
 		m.mu.Unlock()
 		return err
 	}
@@ -463,6 +473,7 @@ func (m *Manager) startReserved(e *entry) error {
 	e.proc = p
 	e.state = "running"
 	e.err = ""
+	m.publishInstanceLocked("instance.state", e)
 	shuttingDown := m.closed
 	m.mu.Unlock()
 	go m.wait(e, p)
@@ -585,6 +596,7 @@ func (m *Manager) wait(e *entry, p *process) {
 		if cleanupErr != nil {
 			e.lastTermination = "process-group cleanup: " + cleanupErr.Error()
 		}
+		m.publishInstanceLocked("instance.state", e)
 	}
 	close(p.done)
 	m.mu.Unlock()
@@ -669,6 +681,7 @@ func (m *Manager) terminate(e *entry, p *process) terminationResult {
 	if !p.exited {
 		p.stopping = true
 		e.state = "stopping"
+		m.publishInstanceLocked("instance.state", e)
 		if p.termAt.IsZero() {
 			p.termAt = time.Now()
 			if err := pidfdSignalGroup(p.pidfd, syscall.SIGTERM); err != nil {
@@ -712,6 +725,7 @@ func (m *Manager) terminate(e *entry, p *process) terminationResult {
 		if e.proc == p {
 			e.state = "failed"
 			e.err = "process did not exit after forced termination"
+			m.publishInstanceLocked("instance.state", e)
 		}
 		m.mu.Unlock()
 		return terminationResult{err: errors.New("process termination timed out")}
@@ -771,6 +785,9 @@ func (m *Manager) Close() error {
 		return err
 	}
 	m.closed = true
+	if m.events != nil {
+		m.events.Close()
+	}
 	m.mu.Unlock()
 	m.opWG.Wait()
 	m.mu.Lock()
@@ -818,6 +835,8 @@ type ring struct {
 	longest   int
 	covered   int
 	redacting bool
+	end       uint64
+	onOutput  func(uint64, []byte)
 }
 
 func newRing(secrets ...string) *ring {
@@ -844,9 +863,20 @@ func (r *ring) appendBounded(p []byte) {
 	}
 	r.b = append(r.b, p...)
 }
+func (r *ring) appendPublished(p []byte) {
+	if len(p) == 0 {
+		return
+	}
+	start := r.end
+	r.appendBounded(p)
+	r.end += uint64(len(p))
+	if r.onOutput != nil {
+		r.onOutput(start, p)
+	}
+}
 func (r *ring) drain(all bool) {
 	if r.longest == 0 {
-		r.appendBounded(r.pending)
+		r.appendPublished(r.pending)
 		r.pending = r.pending[:0]
 		return
 	}
@@ -877,7 +907,7 @@ func (r *ring) drain(all bool) {
 			out = append(out, r.pending[i])
 		}
 	}
-	r.appendBounded(out)
+	r.appendPublished(out)
 	r.pending = append(r.pending[:0], r.pending[limit:]...)
 }
 func (r *ring) Write(p []byte) (int, error) {
@@ -897,5 +927,10 @@ func (r *ring) Write(p []byte) (int, error) {
 }
 func (r *ring) Flush()         { r.mu.Lock(); defer r.mu.Unlock(); r.drain(true) }
 func (r *ring) String() string { r.mu.Lock(); defer r.mu.Unlock(); return string(r.b) }
+func (r *ring) Snapshot() (string, uint64, uint64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return string(r.b), r.end - uint64(len(r.b)), r.end, nil
+}
 
 var _ io.Writer = (*ring)(nil)

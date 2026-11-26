@@ -1,6 +1,6 @@
 # Project status
 
-## Current state
+## Phase 0 inventory (historical)
 
 Phase 0.1 is closed. The user initialized a Git repository on the host with `git init -b main` and ran `scripts/check.sh` successfully (exit 0). Codex can read the repository and confirms branch `main`, no commits, and all intended files untracked. The `.git` directory remains read-only inside the Codex sandbox, so staging and committing must occur host-side or after sandbox permissions change. No files were staged or committed in Phase 0.1. The existing MVP source and tests were preserved. Official host-side coverage baseline: 42.4% `cmd/cs2m`, 71.8% `internal/manager`, 63.4% overall. Native CS2 validation remains pending.
 
@@ -51,3 +51,9 @@ Active definition persistence has moved from `instances.json` to private `instan
 Phase 1.3.1 storage review fixes are implemented on `feat/sqlite-persistence`: connection settings are applied on every driver connection, existing version 1 schemas are checked before use, and stored values are bounded by bytes and type before loading. See [Phase 1.3.1](phases/phase-01-3-1.md) for acceptance evidence. Native CS2 validation remains pending.
 
 Phase 1.3 simulated validation passes: 81 top-level tests (the original 62 retained), full race count=3 exit 0, and the final read-only-module `scripts/check.sh` exit 0. Overall coverage is 79.4% against the local 78.7% pre-change run and published 79.8% baseline. Host-side `go mod tidy` and `go mod verify` both exited 0; sandbox read-only dependency resolution, module verification and build passed. DB-01 through DB-18 are PASS with criterion evidence in the phase report. Native CS2 validation remains pending.
+
+## Phase 1.4 real-time events
+
+The feature branch `feat/realtime-events` adds an authenticated `GET /api/events` stream and updates the existing browser page from snapshots, instance changes and sanitized log bytes. REST, SQLite and process supervision remain in place. The stream has bounded subscribers and queues; slow subscribers are disconnected and reconnect from a new snapshot. See [Phase 1.4](phases/phase-01-4.md) for evidence and remaining limits. Native CS2 validation remains pending.
+
+Phase 1.4 automated acceptance is complete: SSE-01 through SSE-18 PASS, 103 Go top-level tests, seven JavaScript tests and reported 81.1% overall Go coverage. The user subsequently reported SSE-W01 through SSE-W12 PASS from interactive browser validation. An initial HTTP 401 was resolved by using the token for the active isolated runtime; no code change was required. Native CS2 validation remains PENDING. The approved next architectural direction is an API-first headless core, with the TUI as the first official interactive client and a CLI planned for future automation. The embedded browser page remains a temporary validation client.
