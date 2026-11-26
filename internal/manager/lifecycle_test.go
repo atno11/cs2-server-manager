@@ -157,6 +157,9 @@ func TestExitClassificationAndLaunchRecovery(t *testing.T) {
 	if err := os.WriteFile(d.Executable, []byte("#!/bin/sh\necho ready; while :; do sleep 1; done\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
 	m2, err := New(filepath.Join(d.WorkDir, "data"), Policy{Executables: []string{d.Executable}, ExecutableRoots: []string{d.WorkDir}, WorkRoots: []string{d.WorkDir}})
 	if err != nil {
 		t.Fatal(err)
@@ -376,6 +379,9 @@ func TestExecFailureRecovery(t *testing.T) {
 	}
 	if err := m.Start(d.ID); err == nil {
 		t.Fatal("changed trusted executable accepted without policy reload")
+	}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
 	}
 	m2, err := New(filepath.Join(root, "data"), policy)
 	if err != nil {

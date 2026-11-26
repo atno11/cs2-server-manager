@@ -25,3 +25,9 @@ The local operator supplies `policy.json`, defining exact executable identities 
 ## Phase 1.2.1 review correction
 
 The trust-policy boundaries are rechecked at each launch, including root metadata and executable privilege attributes. All JSON input paths use duplicate-key detection. Persisted definitions are bounded before loading. The redactor tracks overlapping secret intervals in captured logs; public instance values are validated before serialization, and API errors have no body. Descriptor execution retains the authorized path in `argv[0]`; native CS2 compatibility is still unverified. See `phases/phase-01-2-1.md`.
+
+## Phase 1.3 SQLite definition storage
+
+`internal/storage` owns `database/sql`, SQLite schema/versioning, migration markers, parameterized definition writes, file checks and the runtime lock. It stores only ID, executable path, working directory, port and ordered arguments. `internal/manager` still validates definitions, owns process handles/states/logs, and uses a small concrete storage boundary for atomic Register/Remove operations. `policy.json` and `admin.token` stay outside the database. A nonblocking `flock` on private `instances.lock` permits one manager for a runtime directory; external SQLite writers remain outside the supported operating model. See [Phase 1.3](phases/phase-01-3.md).
+
+Phase 1.3.1 initializes SQLite PRAGMAs through the driver DSN on each physical connection. Version 1 startup verifies table columns, expected indexes, migration rows and constraint behavior without changing committed data. Loads check SQLite byte lengths and storage types before scanning rows; the manager applies its existing policy validation afterward. See [Phase 1.3.1](phases/phase-01-3-1.md).

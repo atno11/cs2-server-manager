@@ -76,6 +76,9 @@ func TestLifecyclePersistenceAndValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitState(t, m, "one", "stopped")
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
 	m2, err := New(filepath.Join(root, "data"), Policy{Executables: []string{exe}, ExecutableRoots: []string{root}, WorkRoots: []string{root}})
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +86,8 @@ func TestLifecyclePersistenceAndValidation(t *testing.T) {
 	if len(m2.List()) != 2 {
 		t.Fatal("definitions lost")
 	}
-	if err := m.Remove("one"); err != nil {
+	defer m2.Close()
+	if err := m2.Remove("one"); err != nil {
 		t.Fatal(err)
 	}
 }

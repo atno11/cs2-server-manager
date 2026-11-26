@@ -31,3 +31,9 @@ Security hardening is implemented for a single local administrator: bearer authe
 ## Phase 1.2.1
 
 Independent security review fixes are implemented and covered by controlled tests. See `phases/phase-01-2-1.md`. Host-side review and commit are next; native CS2 compatibility must be validated separately before claiming integration readiness. SQLite, SSE and remote-host management remain deferred.
+
+## Phase 1.3
+
+SQLite definition persistence and one-time legacy JSON import are implemented on the feature branch. See `phases/phase-01-3.md` for validation and migration limits. Native CS2 testing and SSE remain separate future work; this phase does not add a process-adoption or remote-host mechanism.
+
+Phase 1.3.1 closes the storage static-review findings on the same feature branch before merge review. Its evidence and residual limits are in `phases/phase-01-3-1.md`. Phase 1.4, SSE and native CS2 validation remain separate work.

@@ -43,3 +43,11 @@ The final review follow-up removes serialized-response redaction through the log
 
 
 Final HTTP response follow-up validation: SRF-01 through SRF-05 PASS, 62 top-level tests, full race count=3 exit 0, `bash scripts/check.sh` exit 0, overall coverage 79.8% versus local pre-change 78.5%. Native CS2 validation remains pending.
+
+## Phase 1.3 SQLite persistence
+
+Active definition persistence has moved from `instances.json` to private `instances.db` with a versioned schema. A transactional, one-time migration imports valid legacy JSON and leaves its bytes unchanged; subsequent starts use SQLite exclusively. The manager keeps live states, process handles and bounded logs in memory. A private lock file enforces one manager per runtime directory. Earlier JSON descriptions above are historical. See [Phase 1.3](phases/phase-01-3.md) for validation and limitations. Native CS2 validation remains pending.
+
+Phase 1.3.1 storage review fixes are implemented on `feat/sqlite-persistence`: connection settings are applied on every driver connection, existing version 1 schemas are checked before use, and stored values are bounded by bytes and type before loading. See [Phase 1.3.1](phases/phase-01-3-1.md) for acceptance evidence. Native CS2 validation remains pending.
+
+Phase 1.3 simulated validation passes: 81 top-level tests (the original 62 retained), full race count=3 exit 0, and the final read-only-module `scripts/check.sh` exit 0. Overall coverage is 79.4% against the local 78.7% pre-change run and published 79.8% baseline. Host-side `go mod tidy` and `go mod verify` both exited 0; sandbox read-only dependency resolution, module verification and build passed. DB-01 through DB-18 are PASS with criterion evidence in the phase report. Native CS2 validation remains pending.
