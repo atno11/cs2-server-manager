@@ -2,7 +2,7 @@
 
 Linux single-host CS2 process manager. Run as an unprivileged user. The HTTP server listens on `127.0.0.1:8080` by default; `CS2M_ADDR` may select another numeric loopback address. `CS2M_DATA` selects the private runtime directory (default `~/.local/share/cs2m`). Public binds are rejected. Go 1.27 and Linux pidfd group signaling with readable `/proc` are required.
 
-The approved product direction is an API-first, headless daemon independent of client UIs. The TUI is the first planned official interactive client; a CLI for automation and an optional default Web UI are planned later. Custom clients can use the public REST and SSE API. The current embedded HTML/JavaScript page is a temporary functional validation client. No TUI or headless-core refactor is part of Phase 1.4.
+The daemon runs headless by default and exposes the public REST and SSE API independently of any UI. Set `CS2M_VALIDATION_UI=1` to enable the temporary HTML/JavaScript validation page at `/` and `/ui.js`; other values leave those routes unavailable. The TUI is the first planned official interactive client and will use this API. A CLI for automation and an optional default Web UI are planned later. Custom clients can use the same API. Phase 1.5 does not implement the TUI.
 
 ## Operator setup
 
@@ -20,9 +20,11 @@ Create a private runtime directory and a mode 0600 `policy.json` before starting
 
 The exact executable path is pinned by device, inode and SHA-256 digest for the manager lifetime. At each start, the trusted roots, executable ownership, mode and file capabilities are rechecked. Changing it requires an operator policy review and manager restart. The manager revalidates the pinned file before every start and launches through its open descriptor. Existing unsafe files or directories cause an explicit failure; permissions are not silently changed.
 
-On first start, the manager generates a random 0600 `admin.token` in the runtime directory. Read this file locally as the administrator, enter its value in the web UI, or send it in an `Authorization: Bearer` header from a programmatic client. Keep it out of URLs, shell history and logs. The UI holds the token only in page memory; closing or refreshing the page clears it. All `/api/` routes require it. The token is not printed by the application. See [security policy](docs/SECURITY.md) for the threat model and limitations.
+On first start, the manager generates a random 0600 `admin.token` in the runtime directory. Read this file locally as the administrator and send it in an `Authorization: Bearer` header from a programmatic client. The optional validation page accepts it in memory. Keep it out of URLs, shell history and logs. All `/api/` routes require it. The token is not printed by the application. See [security policy](docs/SECURITY.md) for the threat model and limitations.
 
 ## API
+
+The [version 1 local API contract](docs/API.md) specifies routes, payloads, status codes, SSE framing, resource limits and reconnection. The reusable Go client in `internal/apiclient` supports every current REST administration route and a bounded pull-based SSE reader. The daemon needs no browser to operate.
 
 - `GET /api/instances` lists public states.
 - `POST /api/instances` registers an instance using JSON: `{"id":"match1","executable":"/srv/cs2/game/bin/linuxsteamrt64/cs2","work_dir":"/srv/cs2-instances/match1","port":27015,"args":[]}`.
@@ -35,4 +37,4 @@ API errors return status codes with empty bodies. The HTTP `args` field accepts 
 
 ## Development
 
-Read [architecture](docs/ARCHITECTURE.md), [status](docs/PROJECT_STATUS.md), [testing](docs/TESTING.md), and [roadmap](docs/ROADMAP.md) before changing behavior. Run `bash scripts/check.sh` for the full regression baseline. Native CS2 validation remains pending.
+Read [architecture](docs/ARCHITECTURE.md), [status](docs/PROJECT_STATUS.md), [testing](docs/TESTING.md), and [roadmap](docs/ROADMAP.md) before changing behavior. Run `bash scripts/check.sh` for the full regression baseline; Node.js is needed for its validation-client JavaScript tests, not for running the daemon. Native CS2 validation remains pending.

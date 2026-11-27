@@ -6,6 +6,7 @@ import (
 	"os"
 	"slices"
 
+	"github.com/atno11/cs2-server-manager/internal/apitypes"
 	"github.com/atno11/cs2-server-manager/internal/events"
 )
 
@@ -13,13 +14,7 @@ const maxSnapshotPayload = 16 * 1024
 const maxLogEventBytes = 2048
 
 // EventInstance contains the same public fields and generic indicators as REST.
-type EventInstance struct {
-	ID              string `json:"id"`
-	Port            int    `json:"port"`
-	State           string `json:"state"`
-	Error           string `json:"error,omitempty"`
-	LastTermination string `json:"last_termination,omitempty"`
-}
+type EventInstance = apitypes.Instance
 
 func eventInstance(e *entry) EventInstance {
 	v := EventInstance{ID: e.def.ID, Port: e.def.Port, State: e.state}
@@ -42,9 +37,7 @@ func (m *Manager) publishInstanceLocked(kind string, e *entry) {
 	if m.events == nil {
 		return
 	}
-	data, _ := json.Marshal(struct {
-		Instance EventInstance `json:"instance"`
-	}{eventInstance(e)})
+	data, _ := json.Marshal(apitypes.InstanceChange{Instance: eventInstance(e)})
 	_, _ = m.events.Publish(kind, data)
 }
 
@@ -52,9 +45,7 @@ func (m *Manager) publishRemovedLocked(id string) {
 	if m.events == nil {
 		return
 	}
-	data, _ := json.Marshal(struct {
-		ID string `json:"id"`
-	}{id})
+	data, _ := json.Marshal(apitypes.Removed{ID: id})
 	_, _ = m.events.Publish("instance.removed", data)
 }
 
@@ -68,12 +59,7 @@ func (m *Manager) publishLog(id string, start uint64, data []byte) {
 			n = maxLogEventBytes
 		}
 		chunk := data[:n]
-		payload, _ := json.Marshal(struct {
-			ID    string `json:"id"`
-			Start uint64 `json:"start"`
-			End   uint64 `json:"end"`
-			Bytes []byte `json:"bytes"`
-		}{id, start, start + uint64(n), chunk})
+		payload, _ := json.Marshal(apitypes.LogEvent{ID: id, Start: start, End: start + uint64(n), Bytes: chunk})
 		_, _ = m.events.Publish("instance.log", payload)
 		start += uint64(n)
 		data = data[n:]
@@ -111,9 +97,7 @@ func (m *Manager) Subscribe() (events.Event, *events.Subscription, error) {
 		}
 		return 0
 	})
-	data, err := json.Marshal(struct {
-		Instances []EventInstance `json:"instances"`
-	}{instances})
+	data, err := json.Marshal(apitypes.Snapshot{Instances: instances})
 	if err != nil || len(data) > maxSnapshotPayload {
 		sub.Cancel()
 		return events.Event{}, nil, errors.New("snapshot exceeds limit")
