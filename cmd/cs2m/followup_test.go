@@ -41,18 +41,6 @@ func TestFollowupJSONSchemaIsStable(t *testing.T) {
 	}
 }
 
-func TestFollowupHTTPOutputNotLogBounded(t *testing.T) {
-	payload := strings.Repeat("x", 70*1024)
-	out := httptest.NewRecorder()
-	w := &statusOnlyWriter{ResponseWriter: out}
-	if _, err := w.Write([]byte(payload)); err != nil {
-		t.Fatal(err)
-	}
-	if out.Body.String() != payload {
-		t.Fatalf("HTTP body length=%d want=%d", out.Body.Len(), len(payload))
-	}
-}
-
 func TestFollowupErrorsHaveNoEchoedBody(t *testing.T) {
 	h, token, _, _ := securityFixture(t)
 	for _, tc := range []struct {

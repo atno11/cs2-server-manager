@@ -19,17 +19,12 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/atno11/cs2-server-manager/internal/apitypes"
 	"github.com/atno11/cs2-server-manager/internal/events"
 	"github.com/atno11/cs2-server-manager/internal/storage"
 )
 
-type Definition struct {
-	ID         string   `json:"id"`
-	Executable string   `json:"executable"`
-	WorkDir    string   `json:"work_dir"`
-	Port       int      `json:"port"`
-	Args       []string `json:"args"`
-}
+type Definition = apitypes.Definition
 type Instance struct {
 	Definition
 	State           string `json:"state"`
