@@ -2,13 +2,13 @@
 
 ## Approved direction
 
-Linux-first Go modular monolith for multiple local CS2 instances, HTTP REST API, SQLite persistence, minimal web frontend, and SSE for live events and logs. Remote hosts are deferred. These are architecture decisions for future implementation, not all current behavior.
+Linux-first, API-first modular monolith for multiple local CS2 instances. The core daemon exposes the public REST and SSE API and must remain independent of any client UI. The TUI is the first planned official interactive client; a CLI for administrative automation and an optional default Web UI are planned later. Custom clients may implement their own interfaces through the documented public API. The current embedded HTML/JavaScript page is a temporary functional validation client, not the final product UI. A future TUI must consume the public API rather than manager internals. Remote hosts are deferred. This direction does not claim that the Phase 1.5 headless consolidation or TUI has been implemented.
 
-## Verified existing implementation
+## Phase 0 inventory (historical)
 
 `cmd/cs2m` starts an HTTP server on `127.0.0.1:8080` by default, rejects non-loopback bind IPs, rejects root execution, serves an HTML page, and defines instance REST handlers. `internal/manager` validates IDs, paths, ports and arguments; stores definitions in an atomically replaced JSON file; supervises child processes with `exec.CommandContext`; serializes manager state with a mutex; captures each instance's output in a bounded 64 KiB memory buffer. There are no nonstandard Go dependencies. Current tests use temporary shell scripts, not CS2.
 
-SQLite and SSE are approved architecture but are not implemented. There is no remote agent or native CS2 validation. Current process and API details are inventoried in `PROJECT_STATUS.md`. Avoid interpreting the approved direction as a claim about existing behavior.
+At that point SQLite and SSE were approved architecture but had not been implemented. There is still no remote agent or native CS2 validation. Later phase sections describe the current implementation.
 
 ## Phase 1.1 lifecycle supervision
 
@@ -31,3 +31,9 @@ The trust-policy boundaries are rechecked at each launch, including root metadat
 `internal/storage` owns `database/sql`, SQLite schema/versioning, migration markers, parameterized definition writes, file checks and the runtime lock. It stores only ID, executable path, working directory, port and ordered arguments. `internal/manager` still validates definitions, owns process handles/states/logs, and uses a small concrete storage boundary for atomic Register/Remove operations. `policy.json` and `admin.token` stay outside the database. A nonblocking `flock` on private `instances.lock` permits one manager for a runtime directory; external SQLite writers remain outside the supported operating model. See [Phase 1.3](phases/phase-01-3.md).
 
 Phase 1.3.1 initializes SQLite PRAGMAs through the driver DSN on each physical connection. Version 1 startup verifies table columns, expected indexes, migration rows and constraint behavior without changing committed data. Loads check SQLite byte lengths and storage types before scanning rows; the manager applies its existing policy validation afterward. See [Phase 1.3.1](phases/phase-01-3-1.md).
+
+## Phase 1.4 real-time events
+
+`internal/events` is a bounded, concurrency-safe broker. It has no database, process or HTTP responsibilities. The manager publishes public registration/removal and state changes while holding its state mutex, after committed persistence where applicable. The existing log ring publishes only finalized sanitized bytes while holding its own mutex; publication never waits for network writes. The broker lock is never held while acquiring a manager or ring lock. The manager takes its mutex before subscribing and copying a snapshot, making the snapshot sequence boundary atomic with state publication. Logs have monotonic per-instance byte offsets, allowing the browser to reconcile retained-log REST snapshots with queued incremental events. `cmd/cs2m` owns authentication, SSE framing, write deadlines and browser assets. See [Phase 1.4](phases/phase-01-4.md).
+
+Phase 1.4.1 adds an HTTP-handler admission reservation alongside the broker subscriber limit. Both permit eight streams, but the HTTP reservation remains held until a handler exits after any blocked write; broker queue overflow alone cannot open capacity for more active handlers. SSE requires a working write deadline before committing headers and terminates a committed stream if a later deadline refresh fails. Browser log reconciliation continues to use generation and load IDs plus byte offsets; the reviewed removal, same-ID recreation and reconnect cases did not require an incarnation field. See [Phase 1.4.1](phases/phase-01-4-1.md).
