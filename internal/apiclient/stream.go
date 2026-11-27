@@ -3,6 +3,7 @@ package apiclient
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -232,7 +233,7 @@ func (s *Stream) decode(kind, id string, data []byte) (Event, error) {
 			return Event{}, ErrInvalidEvent
 		}
 		var value apitypes.Removed
-		if json.Unmarshal(data, &value) != nil || value.ID == "" {
+		if json.Unmarshal(data, &value) != nil || !validID(value.ID) {
 			return Event{}, ErrInvalidEvent
 		}
 		e.RemovedID = value.ID
@@ -240,8 +241,21 @@ func (s *Stream) decode(kind, id string, data []byte) (Event, error) {
 		if len(data) > 4096 {
 			return Event{}, ErrInvalidEvent
 		}
-		var value apitypes.LogEvent
-		if json.Unmarshal(data, &value) != nil || value.ID == "" || value.End < value.Start || value.End-value.Start > 2048 || uint64(len(value.Bytes)) != value.End-value.Start {
+		var wire struct {
+			ID    *string `json:"id"`
+			Start *uint64 `json:"start"`
+			End   *uint64 `json:"end"`
+			Bytes *string `json:"bytes"`
+		}
+		if json.Unmarshal(data, &wire) != nil || wire.ID == nil || wire.Start == nil || wire.End == nil || wire.Bytes == nil || !validID(*wire.ID) {
+			return Event{}, ErrInvalidEvent
+		}
+		decoded, err := base64.StdEncoding.DecodeString(*wire.Bytes)
+		if err != nil {
+			return Event{}, ErrInvalidEvent
+		}
+		value := apitypes.LogEvent{ID: *wire.ID, Start: *wire.Start, End: *wire.End, Bytes: decoded}
+		if !validLogEvent(value) {
 			return Event{}, ErrInvalidEvent
 		}
 		e.Log = &value

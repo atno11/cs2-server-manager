@@ -44,6 +44,8 @@ Phase 1.4.1 reviews effective SSE handler capacity, log reconciliation and write
 
 Phase 1.5 consolidates the daemon into a headless-by-default API service, moves HTTP transport to `internal/api`, documents the version 1 public contract and adds a reusable local Go client. See `phases/phase-01-5.md` and `API.md`. Phase 1.6 TUI implementation remains separate; native CS2 validation remains PENDING.
 
+Phase 1.5.1 reviews the Go client's log recovery coordination, HTTP transport and SSE validation. Phase 1.6 requirement TUI-SEC01: render untrusted logs safely against control characters, ANSI/OSC sequences and malformed UTF-8, while retaining original sanitized byte offsets in the API client. No terminal rendering is part of Phase 1.5.1.
+
 ## Approved sequence after Phase 1.4
 
 The product direction is API-first and headless. The daemon must remain independent of client UIs. The current HTML/JavaScript page is a temporary validation client. The first official interactive client is the TUI, which must consume the public API rather than manager internals. A CLI for administrative automation remains planned; the optional default Web UI is a later client. Custom clients may use the documented public REST and SSE API.

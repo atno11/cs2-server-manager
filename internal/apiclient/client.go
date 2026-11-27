@@ -64,11 +64,16 @@ func New(endpoint, token string) (*Client, error) {
 			return nil, errors.New("invalid API credential")
 		}
 	}
-	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.Proxy = nil
-	t.DialContext = (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext
-	t.ResponseHeaderTimeout = 10 * time.Second
-	t.MaxIdleConnsPerHost = 4
+	t := &http.Transport{
+		Proxy:                  nil,
+		DialContext:            (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ResponseHeaderTimeout:  10 * time.Second,
+		MaxResponseHeaderBytes: 16 * 1024,
+		MaxConnsPerHost:        16,
+		MaxIdleConns:           8,
+		MaxIdleConnsPerHost:    4,
+		IdleConnTimeout:        30 * time.Second,
+	}
 	h := &http.Client{Transport: t, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	return &Client{base: u, token: token, http: h, transport: t}, nil
 }
