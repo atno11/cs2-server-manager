@@ -155,6 +155,54 @@ func TestRealHTTPModelWorkflow(t *testing.T) {
 	if len(m.instances) != 1 || m.instances[0].ID != "beta" {
 		t.Fatal("removal did not update authoritative view")
 	}
+	// A fresh authenticated stream must restore retained logs for the same
+	// selected instance before any new incremental event is consumed.
+	recoverSelected := func(wantState string) {
+		t.Helper()
+		m.reconnect(context.Canceled)
+		result := m.subscribe()()
+		sub, ok := result.(subscribedMsg)
+		if !ok || sub.err != nil {
+			t.Fatalf("resubscribe: %+v", result)
+		}
+		m.Update(sub)
+		e, err := m.stream.Next()
+		if err != nil || e.Type != "snapshot" {
+			t.Fatalf("reconnect snapshot: %s %v", e.Type, err)
+		}
+		_, cmd := m.Update(eventMsg{gen: m.gen, event: e})
+		batch, ok := cmd().(tea.BatchMsg)
+		if !ok || len(batch) < 2 {
+			t.Fatalf("snapshot lacks log fetch before next event read: %d commands", len(batch))
+		}
+		logResult, ok := batch[0]().(logMsg)
+		if !ok || logResult.err != nil {
+			t.Fatalf("retained fetch: %+v", logResult)
+		}
+		m.Update(logResult)
+		log, ok := m.state.Log()
+		if !ok || log.ID != "beta" || m.instances[0].State != wantState {
+			t.Fatalf("reconnected selected log or state missing: log=%+v instances=%+v", log, m.instances)
+		}
+	}
+	recoverSelected("running")
+	result = m.mutate("stop", "beta", apitypes.Definition{})()
+	m.Update(result)
+	for {
+		e := read()
+		if e.Type == "instance.state" && e.Instance.ID == "beta" && e.Instance.State == "stopped" {
+			break
+		}
+	}
+	recoverSelected("stopped")
+	result = m.mutate("start", "beta", apitypes.Definition{})()
+	m.Update(result)
+	for {
+		e := read()
+		if e.Type == "instance.state" && e.Instance.ID == "beta" && e.Instance.State == "running" {
+			break
+		}
+	}
 	m.Close()
 	if _, err := client.Get(ctx, "beta"); err != nil {
 		t.Fatalf("TUI exit stopped daemon or managed instance: %v", err)

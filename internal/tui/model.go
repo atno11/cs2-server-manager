@@ -98,6 +98,7 @@ type Model struct {
 	backoff       int
 	connectedAt   time.Time
 	logRetries    int
+	logTicket     apiclient.LogTicket
 	state         *apiclient.State
 	instances     []apitypes.Instance
 	selected      string
@@ -173,6 +174,8 @@ func readEvent(gen uint64, s eventStream) tea.Cmd {
 }
 
 func (m *Model) reconnect(err error) tea.Cmd {
+	stable := !m.connectedAt.IsZero() && time.Since(m.connectedAt) >= 30*time.Second
+	m.connectedAt = time.Time{}
 	if m.logCancel != nil {
 		m.logCancel()
 		m.logCancel = nil
@@ -194,7 +197,7 @@ func (m *Model) reconnect(err error) tea.Cmd {
 		return nil
 	}
 	m.status = disconnected
-	if !m.connectedAt.IsZero() && time.Since(m.connectedAt) >= 30*time.Second {
+	if stable {
 		m.backoff = 0
 	}
 	steps := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second}
@@ -226,6 +229,7 @@ func (m *Model) beginLog(id string) tea.Cmd {
 		m.message = "Selected instance is unavailable"
 		return nil
 	}
+	m.logTicket = ticket
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.logCancel = cancel
 	gen := m.gen
@@ -361,6 +365,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(m.beginLog(m.selected), readEvent(m.gen, m.stream))
 			}
 			if errors.Is(err, apiclient.ErrStaleLog) && m.selected != "" {
+				if m.logRetries >= 3 {
+					m.message = "Log recovery paused; press L to retry"
+					return m, readEvent(m.gen, m.stream)
+				}
+				m.logRetries++
 				return m, tea.Batch(m.beginLog(m.selected), readEvent(m.gen, m.stream))
 			}
 			return m, m.reconnect(err)
@@ -372,6 +381,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logRetries = 0
 			m.message = "Authoritative snapshot received"
 			cmd = m.syncInstances() // BeginLog happens before scheduling the next read.
+			if cmd == nil && m.selected != "" {
+				cmd = m.beginLog(m.selected)
+			}
 		} else if v.event.Type == "instance.registered" || v.event.Type == "instance.removed" {
 			cmd = m.syncInstances()
 			if v.event.Type == "instance.registered" && v.event.Instance != nil && v.event.Instance.ID == m.selected && cmd == nil {
@@ -391,7 +403,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = reconnecting
 		return m, m.subscribe()
 	case logMsg:
-		if v.gen != m.gen || m.closed {
+		if v.gen != m.gen || m.closed || v.ticket != m.logTicket || m.selected == "" {
 			return m, nil
 		}
 		if v.err != nil {

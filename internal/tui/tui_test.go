@@ -413,6 +413,89 @@ func TestModelReconnectAndStaleGeneration(t *testing.T) {
 	}
 }
 
+func TestSnapshotRecoversRetainedLogsForUnchangedSelection(t *testing.T) {
+	for _, state := range []string{"stopped", "running"} {
+		t.Run(state, func(t *testing.T) {
+			m, a := testModel(t)
+			a.logs = apiclient.LogSnapshot{Bytes: []byte("retained-" + state), End: uint64(len("retained-" + state))}
+			e := snapshot("one")
+			e.Snapshot.Instances[0].State = state
+			_, first := m.Update(eventMsg{gen: m.gen, event: e})
+			if first == nil {
+				t.Fatal("initial snapshot did not schedule commands")
+			}
+			m.Update(m.beginLog("one")())
+			if log, ok := m.state.Log(); !ok || string(log.Bytes) != "retained-"+state {
+				t.Fatal("initial retained log missing")
+			}
+			_, next := m.Update(eventMsg{gen: m.gen, event: e})
+			if err := m.state.Apply(apiclient.Event{Type: "instance.log", Log: &apitypes.LogEvent{ID: "one", Start: uint64(len("retained-" + state)), End: uint64(len("retained-"+state)) + 1, Bytes: []byte("!")}}); err != nil {
+				t.Fatalf("ticket was not established before next event: %v", err)
+			}
+			batch, ok := next().(tea.BatchMsg)
+			if !ok || len(batch) < 2 {
+				t.Fatalf("snapshot did not schedule retained fetch before next read: %T, %d commands", batch, len(batch))
+			}
+			result := batch[0]()
+			if _, ok := result.(logMsg); !ok {
+				t.Fatalf("first command = %T, want log fetch", result)
+			}
+			m.Update(result)
+			if log, ok := m.state.Log(); !ok || string(log.Bytes) != "retained-"+state+"!" {
+				t.Fatal("reconnected retained log missing")
+			}
+		})
+	}
+}
+
+func TestStaleFailedLogRequestDoesNotRetryCurrentSelection(t *testing.T) {
+	for _, next := range []string{"other selection", "new attempt"} {
+		t.Run(next, func(t *testing.T) {
+			m, a := testModel(t)
+			send(m, snapshot("one", "two"))
+			a.logErr = errors.New("canceled request")
+			old := m.beginLog("one")
+			if next == "other selection" {
+				m.selectID("two")
+			} else {
+				m.beginLog("one")
+			}
+			m.Update(old())
+			if m.logRetries != 0 || m.message == "Log request failed; press L to retry" {
+				t.Fatalf("stale failure changed recovery: retries=%d message=%q", m.logRetries, m.message)
+			}
+		})
+	}
+}
+
+func TestStaleLogEventRecoveryIsBounded(t *testing.T) {
+	m, _ := testModel(t)
+	send(m, snapshot("one"))
+	for i := 0; i < 4; i++ {
+		if err := m.state.Apply(snapshot("one")); err != nil {
+			t.Fatal(err)
+		}
+		m.Update(eventMsg{gen: m.gen, event: apiclient.Event{Type: "instance.log", Log: &apitypes.LogEvent{ID: "one", Start: 0, End: 1, Bytes: []byte("x")}}})
+	}
+	if m.logRetries != 3 || m.message != "Log recovery paused; press L to retry" {
+		t.Fatalf("stale recovery unbounded: retries=%d message=%q", m.logRetries, m.message)
+	}
+}
+
+func TestFailedSubscribeDoesNotReusePreviousConnectedAt(t *testing.T) {
+	m, _ := testModel(t)
+	send(m, snapshot())
+	m.connectedAt = time.Now().Add(-time.Minute)
+	m.reconnect(errors.New("stable stream ended"))
+	if m.backoff != 1 {
+		t.Fatalf("stable disconnect backoff=%d", m.backoff)
+	}
+	m.Update(subscribedMsg{gen: m.gen, err: errors.New("subscription failed")})
+	if m.backoff != 2 {
+		t.Fatalf("failed subscription reset backoff to %d", m.backoff)
+	}
+}
+
 func TestReconnectBackoffResetsOnlyAfterStableConnection(t *testing.T) {
 	m, _ := testModel(t)
 	send(m, snapshot())
