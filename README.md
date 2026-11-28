@@ -2,7 +2,7 @@
 
 Linux single-host CS2 process manager. Run as an unprivileged user. The HTTP server listens on `127.0.0.1:8080` by default; `CS2M_ADDR` may select another numeric loopback address. `CS2M_DATA` selects the private runtime directory (default `~/.local/share/cs2m`). Public binds are rejected. Go 1.27 and Linux pidfd group signaling with readable `/proc` are required.
 
-The daemon runs headless by default and exposes the public REST and SSE API independently of any UI. Set `CS2M_VALIDATION_UI=1` to enable the temporary HTML/JavaScript validation page at `/` and `/ui.js`; other values leave those routes unavailable. The TUI is the first planned official interactive client and will use this API. A CLI for automation and an optional default Web UI are planned later. Custom clients can use the same API. Phase 1.5 does not implement the TUI.
+The daemon runs headless by default and exposes the public REST and SSE API independently of any UI. Set `CS2M_VALIDATION_UI=1` to enable the temporary HTML/JavaScript validation page at `/` and `/ui.js`; other values leave those routes unavailable. The independent [local TUI](docs/TUI.md) is the first official interactive client and uses this API. A CLI for automation and an optional default Web UI are planned later. Custom clients can use the same API. Quitting the TUI does not stop the daemon or managed instances.
 
 ## Operator setup
 
@@ -37,4 +37,8 @@ API errors return status codes with empty bodies. The HTTP `args` field accepts 
 
 ## Development
 
+Build the daemon with `go build -o /tmp/cs2m ./cmd/cs2m` and the interactive client with `go build -o /tmp/cs2m-tui ./cmd/cs2m-tui`. Start the daemon first, then run the TUI against its numeric loopback address. The TUI reads the existing private `admin.token` file and does not create credentials. See [TUI.md](docs/TUI.md) for configuration, controls and an isolated simulator validation procedure.
+
 Read [architecture](docs/ARCHITECTURE.md), [status](docs/PROJECT_STATUS.md), [testing](docs/TESTING.md), and [roadmap](docs/ROADMAP.md) before changing behavior. Run `bash scripts/check.sh` for the full regression baseline; Node.js is needed for its validation-client JavaScript tests, not for running the daemon. Native CS2 validation remains pending.
+
+The TUI's simulated interactive workflow (TUI-W01–TUI-W12) and native Ghostty Ctrl+Shift+V paste were user-reported PASS. See the [Phase 1.6](docs/phases/phase-01-6.md) and [Phase 1.6.1](docs/phases/phase-01-6-1.md) reports for evidence and remaining limits. Native CS2 validation remains pending.
