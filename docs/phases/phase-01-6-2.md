@@ -56,3 +56,20 @@ The four targeted regressions passed after the fix. `TestStaleFailedLogRequestDo
 The unrestricted `bash scripts/check.sh` exited 0: gofmt, vet, uncached Go tests, 10/10 JavaScript tests, full race tests, coverage, build and Git whitespace validation passed. Default Go statement coverage is 75.3% (prior committed baseline 75.1%); package `internal/tui` reports 75.2%. Coverage is diagnostic, not a percentage gate. `go test -race -count=3 -timeout=180s ./internal/tui ./cmd/cs2m-tui` exited 0. The unrestricted real HTTP/SSE integration test exited 0; the sandboxed attempt failed solely because `httptest` could not bind loopback. A separate `git diff --check` exited 0. No native CS2 validation or new physical Ghostty validation was performed.
 
 All 12 fixed IR criteria are PASS. Branch remains `feat/tui-mvp` at `33aadd8`. Only the two unrelated untracked skin scripts preceded this phase and remain untouched. This phase changes `internal/tui/model.go`, `internal/tui/tui_test.go`, `internal/tui/integration_test.go`, `docs/TESTING.md`, and this new report. `git status --short` lists exactly those files plus `scripts/download-skins.py` and `scripts/extract-skins.py` as untracked. No commit, push, merge or Phase 1.7 work occurred. Earlier Phase 1.6/1.6.1 user-reported interactive acceptance has not been rewritten; it is separate from this simulated regression work.
+
+## Final physical acceptance follow-up
+
+After commit `fddbe86`, the user reported RT-01 through RT-06 PASS (6/6) from physical Ghostty reconnection and retained-log recovery testing with both running and stopped simulator instances. The individual RT procedures and traces were not supplied here, so these are recorded as user-reported outcomes, separate from the automated and real HTTP/SSE integration evidence above. The user also reported that an independent static review of `fddbe86` found all four F01–F04 corrective findings resolved. That is reviewer-reported static evidence, not a new test execution.
+
+| ID | Result | Evidence |
+|---|---|---|
+| RT-01 | PASS | User-reported physical Ghostty validation; individual observation not supplied. |
+| RT-02 | PASS | User-reported physical Ghostty validation; individual observation not supplied. |
+| RT-03 | PASS | User-reported physical Ghostty validation; individual observation not supplied. |
+| RT-04 | PASS | User-reported physical Ghostty validation; individual observation not supplied. |
+| RT-05 | PASS | User-reported physical Ghostty validation; individual observation not supplied. |
+| RT-06 | PASS | User-reported physical Ghostty validation; individual observation not supplied. |
+
+One recent disconnected session was conclusively traced to the daemon not running. Earlier unexpected disconnections remain unexplained; the stopped-daemon explanation is not applied to them. The original IR-01–IR-12 results remain 12/12 PASS. The earlier REG-01 and REG-02 investigative criteria remain PENDING because the historical `n` failure was not reproduced or diagnosed. Native CS2 validation remains PENDING. The Phase 1.6.2 automated baseline remains 151 Go top-level tests, 10 JavaScript tests and 75.3% default Go coverage from the prior executed check; no automated tests were rerun for this documentation-only closeout.
+
+Documentation closeout Git state: branch `feat/tui-mvp` at `fddbe86`; the tracked tree was clean before these edits. Only `docs/phases/phase-01-6-2.md`, `docs/PROJECT_STATUS.md`, `docs/TESTING.md` and `docs/ROADMAP.md` are changed by this closeout. Unrelated untracked `scripts/download-skins.py` and `scripts/extract-skins.py` remain untouched. No production files, tests or dependencies changed; no commit, push, merge or Phase 1.7 work occurred.
