@@ -46,6 +46,8 @@ Phase 1.5 consolidates the daemon into a headless-by-default API service, moves 
 
 Phase 1.5.1 reviews the Go client's log recovery coordination, HTTP transport and SSE validation. Phase 1.6 requirement TUI-SEC01: render untrusted logs safely against control characters, ANSI/OSC sequences and malformed UTF-8, while retaining original sanitized byte offsets in the API client. No terminal rendering is part of Phase 1.5.1.
 
+Phase 1.6 implements the first official interactive client as a separate process consuming the public API. The TUI implementation and automated evidence are in `phases/phase-01-6.md`; user-operated terminal acceptance remains a separately reported step. Native CS2 validation remains PENDING and Phase 1.7 is not started by this work.
+
 ## Approved sequence after Phase 1.4
 
 The product direction is API-first and headless. The daemon must remain independent of client UIs. The current HTML/JavaScript page is a temporary validation client. The first official interactive client is the TUI, which must consume the public API rather than manager internals. A CLI for administrative automation remains planned; the optional default Web UI is a later client. Custom clients may use the documented public REST and SSE API.
@@ -65,3 +67,5 @@ The product direction is API-first and headless. The daemon must remain independ
 | 8.0 | Remote Host Management. |
 
 CLI development remains planned without a phase assignment in this sequence. Native CS2 validation is still PENDING. Phase 1.5 prepares the public API for Phase 1.6 without implementing the TUI.
+
+Phase 1.6 and the paste follow-up are complete for simulated TUI use: all 12 physical TUI checks and native Ghostty Ctrl+Shift+V paste were user-reported PASS. Two historical keyboard diagnostic criteria remain PENDING because the prior `n` failure was not reproduced or explained; current connected `n` operation is user-confirmed. Long log lines need future horizontal scrolling or wrapping. Earlier unexpected SSE disconnections remain unexplained despite passing explicit and interactive reconnect checks. Phase 1.7 is a proposed native CS2 validation phase and has not started; it must establish a verified installation and safe test plan before execution.
